@@ -1,0 +1,5 @@
+# Apache defaults for the signage app
+php_value upload_max_filesize 2G
+php_value post_max_size 2G
+php_value max_execution_time 600
+Options -Indexes
