@@ -105,6 +105,7 @@ if ($action !== null) {
 
     case 'content_upload':
         $ok = 0; $failed = [];
+        $folderId = ($_POST['folder_id'] ?? '') !== '' ? (int) $_POST['folder_id'] : ensure_unsorted_folder($pdo);
         $files = $_FILES['files'] ?? null;
         if ($files) {
             foreach ((array) $files['name'] as $i => $orig) {
@@ -119,10 +120,10 @@ if ($action !== null) {
                 if (!file_exists($dest) && !move_uploaded_file($tmp, $dest)) { $failed[] = $orig; continue; }
                 $type = str_starts_with($mime, 'video/') ? 'video' : 'image';
                 $dur  = $type === 'video' ? probe_duration($dest) : null;
-                $pdo->prepare('INSERT INTO content (type, title, filename, mime, size, duration, created_at)
-                               VALUES (?,?,?,?,?,?,?)')
+                $pdo->prepare('INSERT INTO content (type, title, filename, mime, size, duration, folder_id, created_at)
+                               VALUES (?,?,?,?,?,?,?,?)')
                     ->execute([$type, pathinfo($orig, PATHINFO_FILENAME) ?: $name, $name, $mime,
-                               filesize($dest), $dur, now()]);
+                               filesize($dest), $dur, $folderId, now()]);
                 $ok++;
             }
         }
@@ -132,8 +133,9 @@ if ($action !== null) {
     case 'content_url':
         $url = trim($_POST['url'] ?? '');
         if (!preg_match('#^https?://#i', $url)) { flash('URL must start with http(s)://'); redirect('index.php?page=content'); }
-        $pdo->prepare('INSERT INTO content (type, title, url, created_at) VALUES (?,?,?,?)')
-            ->execute(['url', trim($_POST['title'] ?? '') ?: $url, $url, now()]);
+        $folderId = ($_POST['folder_id'] ?? '') !== '' ? (int) $_POST['folder_id'] : ensure_unsorted_folder($pdo);
+        $pdo->prepare('INSERT INTO content (type, title, url, folder_id, created_at) VALUES (?,?,?,?,?)')
+            ->execute(['url', trim($_POST['title'] ?? '') ?: $url, $url, $folderId, now()]);
         flash('Web page added.');
         redirect('index.php?page=content');
 
@@ -151,6 +153,38 @@ if ($action !== null) {
         }
         touch_all_playlists();
         flash('Content deleted.');
+        redirect('index.php?page=content');
+
+    case 'content_move_folder':
+        $folderId = ($_POST['folder_id'] ?? '') !== '' ? (int) $_POST['folder_id'] : ensure_unsorted_folder($pdo);
+        $pdo->prepare('UPDATE content SET folder_id=? WHERE id=?')->execute([$folderId, (int) $_POST['id']]);
+        redirect('index.php?page=content');
+
+    case 'folder_create':
+        $name = trim($_POST['name'] ?? '');
+        if ($name === '') { flash('Folder needs a name.'); redirect('index.php?page=content'); }
+        $pdo->prepare('INSERT INTO folders (name, created_at) VALUES (?,?)')->execute([$name, now()]);
+        flash('Folder created.');
+        redirect('index.php?page=content');
+
+    case 'folder_delete':
+        $fid = (int) $_POST['id'];
+        // Deleting a folder deletes everything filed inside it — mirrors "delete folder" on a filesystem.
+        $c = $pdo->prepare('SELECT * FROM content WHERE folder_id=?');
+        $c->execute([$fid]);
+        $n = 0;
+        foreach ($c->fetchAll() as $row) {
+            $pdo->prepare('DELETE FROM content WHERE id=?')->execute([$row['id']]);
+            if ($row['filename']) {
+                $ref = $pdo->prepare('SELECT COUNT(*) FROM content WHERE filename=?');
+                $ref->execute([$row['filename']]);
+                if (!$ref->fetchColumn()) { @unlink(storage_path('media/' . $row['filename'])); }
+            }
+            $n++;
+        }
+        $pdo->prepare('DELETE FROM folders WHERE id=?')->execute([$fid]);
+        touch_all_playlists();
+        flash("Folder deleted ($n item(s) removed with it).");
         redirect('index.php?page=content');
 
     case 'playlist_save':
@@ -177,6 +211,30 @@ if ($action !== null) {
         $pdo->prepare('INSERT INTO playlist_items (playlist_id, content_id, position, duration_override, muted)
                        VALUES (?,?,?,?,?)')
             ->execute([$pid, (int) $_POST['content_id'], $pos, $dur, isset($_POST['muted']) ? 1 : 0]);
+        touch_playlist($pid);
+        redirect('index.php?page=playlist&id=' . $pid);
+
+    case 'item_add_folder':
+        $pid = (int) $_POST['playlist_id'];
+        $fid = (int) $_POST['folder_id'];
+        $dur = ($_POST['duration'] ?? '') !== '' ? (float) $_POST['duration'] : null;
+        $muted = isset($_POST['muted']) ? 1 : 0;
+        $pos = (int) $pdo->query('SELECT COALESCE(MAX(position),0) FROM playlist_items WHERE playlist_id=' . $pid)->fetchColumn();
+        $folderContent = $pdo->prepare('SELECT id FROM content WHERE folder_id=? ORDER BY title, id');
+        $folderContent->execute([$fid]);
+        $ins = $pdo->prepare('INSERT INTO playlist_items (playlist_id, content_id, position, duration_override, muted)
+                               VALUES (?,?,?,?,?)');
+        foreach ($folderContent->fetchAll() as $row) {
+            $ins->execute([$pid, $row['id'], ++$pos, $dur, $muted]);
+        }
+        touch_playlist($pid);
+        redirect('index.php?page=playlist&id=' . $pid);
+
+    case 'item_set_duration':
+        $pid = (int) $_POST['playlist_id'];
+        $dur = ($_POST['duration'] ?? '') !== '' ? (float) $_POST['duration'] : null;
+        $pdo->prepare('UPDATE playlist_items SET duration_override=? WHERE id=? AND playlist_id=?')
+            ->execute([$dur, (int) $_POST['id'], $pid]);
         touch_playlist($pid);
         redirect('index.php?page=playlist&id=' . $pid);
 
@@ -467,7 +525,14 @@ if ($page === 'playlist') {
                             WHERE pi.playlist_id=? ORDER BY pi.position, pi.id');
     $items->execute([$id]);
     $items = $items->fetchAll();
-    $allContent = $pdo->query('SELECT id, type, title FROM content ORDER BY type, title')->fetchAll();
+    $unsortedId = ensure_unsorted_folder($pdo);
+    $folders = $pdo->query('SELECT f.*, COUNT(c.id) AS n FROM folders f
+                            JOIN content c ON c.folder_id = f.id
+                            GROUP BY f.id ORDER BY f.name')->fetchAll();
+    usort($folders, fn ($a, $b) => ((int) $a['id'] === $unsortedId) <=> ((int) $b['id'] === $unsortedId));
+    $allContent = $pdo->query('SELECT id, type, title, folder_id FROM content ORDER BY type, title')->fetchAll();
+    $contentByFolder = [];
+    foreach ($allContent as $c) { $contentByFolder[(int) $c['folder_id']][] = $c; }
 
     layout_top($pl['name']); ?>
     <div class="pagehead">
@@ -496,9 +561,15 @@ if ($page === 'playlist') {
           <td><span class="tag <?= e($it['type']) ?>"><?= e($it['type']) ?></span></td>
           <td><?= e($it['title']) ?><?= $it['type'] === 'url' ? ' <span class="muted">' . e($it['url']) . '</span>' : '' ?></td>
           <td>
-            <?php if ($it['duration_override'] !== null): ?><?= (float) $it['duration_override'] ?> s
-            <?php elseif ($it['type'] === 'video'): ?><span class="muted">full length<?= $it['nat'] ? ' (' . round((float) $it['nat']) . ' s)' : '' ?></span>
-            <?php else: ?><span class="muted"><?= (int) cfg('default_duration') ?> s (default)</span><?php endif ?>
+            <form method="post" class="row">
+              <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="item_set_duration">
+              <input type="hidden" name="id" value="<?= $it['id'] ?>"><input type="hidden" name="playlist_id" value="<?= $pl['id'] ?>">
+              <input type="number" step="0.5" min="1" name="duration" style="width:5em"
+                     value="<?= $it['duration_override'] !== null ? (float) $it['duration_override'] : '' ?>"
+                     placeholder="<?= $it['type'] === 'video' ? 'full' : (int) cfg('default_duration') ?>">
+              <button class="ghost sm">set</button>
+            </form>
+            <?php if ($it['type'] === 'video' && $it['nat']): ?><span class="hint"><?= round((float) $it['nat']) ?> s natural</span><?php endif ?>
           </td>
           <td><?= $it['type'] === 'video' ? ($it['muted'] ? 'muted' : '🔊 on') : '—' ?></td>
           <td class="row">
@@ -517,32 +588,69 @@ if ($page === 'playlist') {
       </table>
       <?php else: ?><p class="empty">Empty playlist — screens scheduled to it will show black.</p><?php endif ?>
 
-      <h3>Add item</h3>
-      <?php if (!$allContent): ?><p class="empty">Upload some <a href="index.php?page=content">content</a> first.</p>
-      <?php else: ?>
-      <form method="post" class="grid">
-        <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="item_add">
-        <input type="hidden" name="playlist_id" value="<?= $pl['id'] ?>">
-        <label>Content
-          <select name="content_id"><?php foreach ($allContent as $c): ?>
-            <option value="<?= $c['id'] ?>">[<?= e($c['type']) ?>] <?= e($c['title']) ?></option><?php endforeach ?>
-          </select>
-        </label>
-        <label>Duration (s) <input type="number" step="0.5" min="1" name="duration" placeholder="auto">
-          <span class="hint">videos: blank = full length</span></label>
-        <label class="inline"><input type="checkbox" name="muted" checked> mute video</label>
-        <button>Add to playlist</button>
-      </form>
-      <?php endif ?>
+      <h3>Add content</h3>
+      <?php if (!$folders): ?><p class="empty">Upload some <a href="index.php?page=content">content</a> first.</p>
+      <?php else: foreach ($folders as $f):
+        $group = $contentByFolder[(int) $f['id']] ?? []; ?>
+      <details class="card foldergroup">
+        <summary><?= e($f['name']) ?> <span class="hint">(<?= (int) $f['n'] ?>)</span></summary>
+        <div class="details-body">
+          <form method="post" class="row">
+            <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="item_add_folder">
+            <input type="hidden" name="playlist_id" value="<?= $pl['id'] ?>">
+            <input type="hidden" name="folder_id" value="<?= $f['id'] ?>">
+            <label>Duration (s) <input type="number" step="0.5" min="1" name="duration" placeholder="auto" style="width:6em"></label>
+            <label class="inline"><input type="checkbox" name="muted" checked> mute video</label>
+            <button>Add all <?= (int) $f['n'] ?> item(s) from this folder</button>
+          </form>
+          <?php if ($group): ?>
+          <table>
+            <tr><th>Type</th><th>Title</th><th></th></tr>
+            <?php foreach ($group as $c): ?>
+            <tr>
+              <td><span class="tag <?= e($c['type']) ?>"><?= e($c['type']) ?></span></td>
+              <td><?= e($c['title']) ?></td>
+              <td>
+                <form method="post" class="row">
+                  <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="item_add">
+                  <input type="hidden" name="playlist_id" value="<?= $pl['id'] ?>">
+                  <input type="hidden" name="content_id" value="<?= $c['id'] ?>">
+                  <input type="number" step="0.5" min="1" name="duration" placeholder="auto" style="width:6em">
+                  <label class="inline"><input type="checkbox" name="muted" checked> mute</label>
+                  <button class="ghost sm">add</button>
+                </form>
+              </td>
+            </tr>
+            <?php endforeach ?>
+          </table>
+          <?php endif ?>
+        </div>
+      </details>
+      <?php endforeach; endif ?>
     </section>
     <?php layout_bottom(); exit;
 }
 
 /* Content library */
 if ($page === 'content') {
+    $unsortedId = ensure_unsorted_folder($pdo);
+    $folders = $pdo->query('SELECT f.*, COUNT(c.id) AS n FROM folders f
+                            LEFT JOIN content c ON c.folder_id = f.id
+                            GROUP BY f.id ORDER BY f.name')->fetchAll();
+    // Unsorted is the fallback bucket, not a folder the admin made — keep it last.
+    usort($folders, fn ($a, $b) => ((int) $a['id'] === $unsortedId) <=> ((int) $b['id'] === $unsortedId));
+
     $rows = $pdo->query('SELECT c.*, COUNT(pi.id) AS used FROM content c
                          LEFT JOIN playlist_items pi ON pi.content_id = c.id
-                         GROUP BY c.id ORDER BY c.created_at DESC')->fetchAll();
+                         GROUP BY c.id ORDER BY c.type, c.title')->fetchAll();
+
+    $byFolder = [];
+    foreach ($rows as $c) { $byFolder[(int) $c['folder_id']][] = $c; }
+
+    // Every content row belongs to a folder now; the dropdowns' "default" option
+    // means "Unsorted" rather than listing it a second time as a real choice.
+    $pickableFolders = array_values(array_filter($folders, fn ($f) => (int) $f['id'] !== $unsortedId));
+
     layout_top('Content'); ?>
     <div class="pagehead"><h1>Content</h1></div>
 
@@ -553,6 +661,14 @@ if ($page === 'content') {
           <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="content_upload">
           <input type="file" name="files[]" multiple required
                  accept="<?= e(implode(',', array_keys(cfg('allowed_mime')))) ?>">
+          <label>Folder
+            <select name="folder_id">
+              <option value="">Unsorted (default)</option>
+              <?php foreach ($pickableFolders as $f): ?>
+                <option value="<?= $f['id'] ?>"><?= e($f['name']) ?></option>
+              <?php endforeach ?>
+            </select>
+          </label>
           <p class="hint">MP4 (H.264) and WebM for video; JPG/PNG/WebP/GIF for images.
              Max ≈ <?= e(cfg('max_upload_hint')) ?> per request (php.ini).</p>
           <button>Upload</button> <span id="uploadBusy" class="hint" hidden>uploading…</span>
@@ -564,6 +680,14 @@ if ($page === 'content') {
           <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="content_url">
           <label>Title <input name="title" placeholder="Weather dashboard"></label>
           <label class="wide">URL <input name="url" type="url" placeholder="https://…" required></label>
+          <label>Folder
+            <select name="folder_id">
+              <option value="">Unsorted (default)</option>
+              <?php foreach ($pickableFolders as $f): ?>
+                <option value="<?= $f['id'] ?>"><?= e($f['name']) ?></option>
+              <?php endforeach ?>
+            </select>
+          </label>
           <p class="hint wide">The page must allow embedding (no <code>X-Frame-Options: deny</code> /
              restrictive CSP) and is skipped automatically while a player is offline.</p>
           <button>Add page</button>
@@ -571,30 +695,81 @@ if ($page === 'content') {
       </section>
     </div>
 
-    <?php if ($rows): ?>
-    <table>
-      <tr><th>Type</th><th>Title</th><th>Details</th><th>Used in</th><th>Added</th><th></th></tr>
-      <?php foreach ($rows as $c): ?>
-      <tr>
-        <td><span class="tag <?= e($c['type']) ?>"><?= e($c['type']) ?></span></td>
-        <td><?= e($c['title']) ?></td>
-        <td class="muted">
-          <?php if ($c['type'] === 'url'): ?><?= e($c['url']) ?>
-          <?php else: ?><?= human_size((int) $c['size']) ?><?= $c['duration'] ? ' · ' . round((float) $c['duration']) . ' s' : '' ?>
-            · <a href="media.php?f=<?= e($c['filename']) ?>" target="_blank">preview</a><?php endif ?>
-        </td>
-        <td><?= (int) $c['used'] ?> playlist item(s)</td>
-        <td class="muted"><?= date('d M Y', (int) $c['created_at']) ?></td>
-        <td>
-          <form method="post" onsubmit="return confirm('Delete this content? It is removed from all playlists.')">
-            <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="content_delete">
-            <input type="hidden" name="id" value="<?= $c['id'] ?>"><button class="danger sm">delete</button>
-          </form>
-        </td>
-      </tr>
-      <?php endforeach ?>
-    </table>
-    <?php else: ?><p class="empty">Library is empty.</p><?php endif;
+    <section class="card">
+      <h2>Folders</h2>
+      <table>
+        <tr><th>Name</th><th>Items</th><th></th></tr>
+        <?php foreach ($folders as $f): ?>
+        <tr>
+          <td><?= e($f['name']) ?><?= (int) $f['id'] === $unsortedId ? ' <span class="hint">(default, always exists)</span>' : '' ?></td>
+          <td><?= (int) $f['n'] ?></td>
+          <td>
+            <?php if ((int) $f['id'] !== $unsortedId): ?>
+            <form method="post" onsubmit="return confirm('Delete folder &quot;<?= e($f['name']) ?>&quot; and all <?= (int) $f['n'] ?> item(s) inside it? This cannot be undone.')">
+              <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="folder_delete">
+              <input type="hidden" name="id" value="<?= $f['id'] ?>"><button class="danger sm">delete folder + contents</button>
+            </form>
+            <?php endif ?>
+          </td>
+        </tr>
+        <?php endforeach ?>
+      </table>
+      <h3>New folder</h3>
+      <form method="post" class="row">
+        <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="folder_create">
+        <input name="name" placeholder="e.g. Lobby loop" required>
+        <button>Create folder</button>
+      </form>
+    </section>
+
+    <?php if (!$rows): ?>
+      <p class="empty">Library is empty.</p>
+    <?php else:
+      foreach ($folders as $f):
+        $group = $byFolder[(int) $f['id']] ?? [];
+        if (!$group) { continue; } ?>
+    <details class="card foldergroup">
+      <summary><?= e($f['name']) ?> <span class="hint">(<?= count($group) ?>)</span></summary>
+      <div class="details-body">
+      <table>
+        <tr><th>Type</th><th>Title</th><th>Details</th><th>Used in</th><th>Added</th><th>Folder</th><th></th></tr>
+        <?php foreach ($group as $c): ?>
+        <tr>
+          <td><span class="tag <?= e($c['type']) ?>"><?= e($c['type']) ?></span></td>
+          <td><?= e($c['title']) ?></td>
+          <td class="muted">
+            <?php if ($c['type'] === 'url'): ?><?= e($c['url']) ?>
+            <?php else: ?><?= human_size((int) $c['size']) ?><?= $c['duration'] ? ' · ' . round((float) $c['duration']) . ' s' : '' ?>
+              · <a href="media.php?f=<?= e($c['filename']) ?>" target="_blank">preview</a><?php endif ?>
+          </td>
+          <td><?= (int) $c['used'] ?> playlist item(s)</td>
+          <td class="muted"><?= date('d M Y', (int) $c['created_at']) ?></td>
+          <td>
+            <form method="post" class="row">
+              <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="content_move_folder">
+              <input type="hidden" name="id" value="<?= $c['id'] ?>">
+              <select name="folder_id">
+                <option value="" <?= (int) $c['folder_id'] === $unsortedId ? 'selected' : '' ?>>Unsorted</option>
+                <?php foreach ($pickableFolders as $ff): ?>
+                  <option value="<?= $ff['id'] ?>" <?= (int) $c['folder_id'] === (int) $ff['id'] ? 'selected' : '' ?>><?= e($ff['name']) ?></option>
+                <?php endforeach ?>
+              </select>
+              <button class="ghost sm">move</button>
+            </form>
+          </td>
+          <td>
+            <form method="post" onsubmit="return confirm('Delete this content? It is removed from all playlists.')">
+              <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="content_delete">
+              <input type="hidden" name="id" value="<?= $c['id'] ?>"><button class="danger sm">delete</button>
+            </form>
+          </td>
+        </tr>
+        <?php endforeach ?>
+      </table>
+      </div>
+    </details>
+    <?php endforeach;
+    endif;
     layout_bottom(); exit;
 }
 

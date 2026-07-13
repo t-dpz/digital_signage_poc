@@ -293,8 +293,12 @@ function showUrl(item, layer, show) {
   f.src = item.url;
   f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
   layer.appendChild(f);
-  f.addEventListener('load', show, { once: true });
-  setTimeout(show, 6000);                             // show anyway if load never fires
+  // load and the 6s fallback race each other — guard so show() (which mutates
+  // state.front) never fires twice, or the second call blanks the active layer.
+  let shown = false;
+  const showOnce = () => { if (!shown) { shown = true; show(); } };
+  f.addEventListener('load', showOnce, { once: true });
+  setTimeout(showOnce, 6000);                         // show anyway if load never fires
   state.advanceTimer = setTimeout(advance, (item.duration || 15) * 1000);
 }
 

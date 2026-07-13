@@ -39,6 +39,8 @@ function db(): PDO
     $pdo->exec('PRAGMA foreign_keys = ON');
     if ($fresh) {
         install_schema($pdo);
+    } else {
+        migrate_schema($pdo);
     }
     return $pdo;
 }
@@ -57,6 +59,11 @@ CREATE TABLE screens (
     updated_at           INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
 );
+CREATE TABLE folders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE TABLE content (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     type       TEXT NOT NULL CHECK (type IN ('video','image','url')),
@@ -66,6 +73,7 @@ CREATE TABLE content (
     size       INTEGER NOT NULL DEFAULT 0,
     duration   REAL,                        -- probed video duration (seconds), NULL if unknown
     url        TEXT NOT NULL DEFAULT '',    -- for type=url
+    folder_id  INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE playlists (
@@ -95,7 +103,53 @@ CREATE TABLE schedules (
 );
 CREATE INDEX idx_items_playlist ON playlist_items(playlist_id, position);
 CREATE INDEX idx_sched_screen   ON schedules(screen_id);
+CREATE INDEX idx_content_folder ON content(folder_id);
 SQL);
+}
+
+/**
+ * Idempotent guard so existing (pre-folders) databases pick up the new
+ * table/column without a migration system — see CLAUDE.md "no migrations".
+ */
+function migrate_schema(PDO $pdo): void
+{
+    $hasFolders = $pdo->query(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='folders'"
+    )->fetchColumn();
+    if (!$hasFolders) {
+        $pdo->exec(<<<'SQL'
+CREATE TABLE folders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+SQL);
+    }
+    $hasFolderId = false;
+    foreach ($pdo->query('PRAGMA table_info(content)') as $col) {
+        if ($col['name'] === 'folder_id') { $hasFolderId = true; break; }
+    }
+    if (!$hasFolderId) {
+        $pdo->exec('ALTER TABLE content ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_content_folder ON content(folder_id)');
+    }
+    // Invariant: every content row belongs to a folder — sweep stragglers into "Unsorted"
+    // (covers rows created before this invariant existed, or left null by any other path).
+    if ((int) $pdo->query('SELECT COUNT(*) FROM content WHERE folder_id IS NULL')->fetchColumn() > 0) {
+        $uid = ensure_unsorted_folder($pdo);
+        $pdo->prepare('UPDATE content SET folder_id=? WHERE folder_id IS NULL')->execute([$uid]);
+    }
+}
+
+/** Get-or-create the catch-all folder every uncategorized content item lands in. */
+function ensure_unsorted_folder(PDO $pdo): int
+{
+    $id = $pdo->query("SELECT id FROM folders WHERE name = 'Unsorted'")->fetchColumn();
+    if ($id) {
+        return (int) $id;
+    }
+    $pdo->prepare('INSERT INTO folders (name, created_at) VALUES (?, ?)')->execute(['Unsorted', now()]);
+    return (int) $pdo->lastInsertId();
 }
 
 function now(): int
