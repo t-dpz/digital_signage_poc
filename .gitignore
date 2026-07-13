@@ -1,0 +1,17 @@
+# Secrets — commit config.example.php instead
+config.php
+CLAUDE.md
+
+# Runtime data (DB contains screen tokens; media may be internal content)
+storage/*
+!storage/.htaccess
+!storage/media/
+storage/media/*
+
+# Claude Code local state
+.claude/settings.local.json
+
+# OS/editor noise
+nohup.out
+*.log
+.DS_Store
