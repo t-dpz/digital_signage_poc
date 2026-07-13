@@ -37,6 +37,20 @@ h2 { font-size: 15px; margin: 0 0 14px; letter-spacing: .04em; text-transform: u
 h3 { font-size: 14px; margin: 22px 0 10px; color: var(--dim); }
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-bottom: 20px; }
+
+details.foldergroup { padding: 0; }
+details.foldergroup > summary {
+  cursor: pointer; list-style: none; padding: 14px 20px;
+  font-size: 15px; font-weight: 600; color: var(--ink);
+  display: flex; align-items: center; gap: 8px;
+}
+details.foldergroup > summary::-webkit-details-marker { display: none; }
+details.foldergroup > summary::before {
+  content: '▸'; color: var(--dim); font-size: 12px; transition: transform .15s;
+}
+details.foldergroup[open] > summary::before { transform: rotate(90deg); }
+details.foldergroup > summary:hover { color: var(--accent); }
+details.foldergroup > .details-body { padding: 0 20px 18px; }
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
 
