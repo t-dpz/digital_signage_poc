@@ -6,6 +6,11 @@ declare(strict_types=1);
 
 const SIGNAGE_VERSION = '1.0.0';
 const ROTATION_DEFAULT_SECONDS = 120.0; // schedules tied on day/time/priority rotate at this cadence unless overridden
+// Multiple `schedules` rows sharing a group_id are one admin-facing "rule" with several
+// OR'd time windows (e.g. 08:00–09:00 OR 14:00–15:00) — same playlist/days/priority/dates,
+// just more than one start/end pair. Purely an admin UI/editing grouping: build_manifest()
+// and the resolvers still see (and only ever need) flat, independent per-window rows.
+const MAX_SCHEDULE_WINDOWS = 4;
 // Per-chunk size for content_upload_*. Deliberately under PHP's stock upload_max_filesize/
 // post_max_size (2M/8M) so chunked upload works even without the 2G .htaccess override present.
 const UPLOAD_CHUNK_BYTES = 1024 * 1024;
@@ -121,9 +126,11 @@ CREATE TABLE schedules (
     date_start  TEXT,                          -- YYYY-MM-DD, optional
     date_end    TEXT,                          -- YYYY-MM-DD, optional (inclusive)
     priority    INTEGER NOT NULL DEFAULT 0,
-    rotation_seconds REAL                      -- seconds this schedule gets when tied with
+    rotation_seconds REAL,                     -- seconds this schedule gets when tied with
                                                 -- another active schedule at equal priority;
                                                 -- NULL = ROTATION_DEFAULT_SECONDS
+    group_id    TEXT NOT NULL DEFAULT ''       -- rows sharing this id are one admin-facing
+                                                -- multi-window rule — see MAX_SCHEDULE_WINDOWS
 );
 CREATE TABLE power_schedules (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +142,7 @@ CREATE TABLE power_schedules (
 );
 CREATE INDEX idx_items_playlist ON playlist_items(playlist_id, position);
 CREATE INDEX idx_sched_screen   ON schedules(screen_id);
+CREATE INDEX idx_sched_group    ON schedules(group_id);
 CREATE INDEX idx_content_folder ON content(folder_id);
 CREATE INDEX idx_power_sched_screen ON power_schedules(screen_id);
 SQL);
@@ -178,6 +186,16 @@ SQL);
     }
     if (!$hasRotation) {
         $pdo->exec('ALTER TABLE schedules ADD COLUMN rotation_seconds REAL');
+    }
+    $hasGroupId = false;
+    foreach ($pdo->query('PRAGMA table_info(schedules)') as $col) {
+        if ($col['name'] === 'group_id') { $hasGroupId = true; break; }
+    }
+    if (!$hasGroupId) {
+        $pdo->exec("ALTER TABLE schedules ADD COLUMN group_id TEXT NOT NULL DEFAULT ''");
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sched_group ON schedules(group_id)');
+        // Every pre-existing row becomes its own singleton group — no behavior/display change.
+        $pdo->exec("UPDATE schedules SET group_id = 'sg' || id WHERE group_id = ''");
     }
     $hasPendingCommand = false;
     foreach ($pdo->query('PRAGMA table_info(screens)') as $col) {

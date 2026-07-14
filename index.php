@@ -109,45 +109,57 @@ if ($action !== null) {
         redirect('index.php?page=screen&id=' . (int) $_POST['id']);
 
     case 'schedule_add':
+        $screenId = (int) $_POST['screen_id'];
+        $windows = schedule_windows_from_post($_POST);
+        if (!$windows) { flash('At least one time window is required.'); redirect('index.php?page=screen&id=' . $screenId); }
         $mask = 0;
         foreach ($_POST['dow'] ?? [] as $d) { $mask |= 1 << (int) $d; }
-        $st = preg_match('/^\d{2}:\d{2}$/', $_POST['start_time'] ?? '') ? $_POST['start_time'] : '00:00';
-        $en = preg_match('/^\d{2}:\d{2}$/', $_POST['end_time'] ?? '')   ? $_POST['end_time']   : '24:00';
         $rot = ($_POST['rotation_seconds'] ?? '') !== '' ? (float) $_POST['rotation_seconds'] : null;
         if ($rot !== null && $rot < ROTATION_DEFAULT_SECONDS) { $rot = ROTATION_DEFAULT_SECONDS; }
-        $pdo->prepare('INSERT INTO schedules (screen_id, playlist_id, dow_mask, start_time, end_time,
-                       date_start, date_end, priority, rotation_seconds) VALUES (?,?,?,?,?,?,?,?,?)')
-            ->execute([
-                (int) $_POST['screen_id'], (int) $_POST['playlist_id'],
-                $mask ?: 127, $st, $en,
+        $groupId = bin2hex(random_bytes(6));
+        $ins = $pdo->prepare('INSERT INTO schedules (screen_id, playlist_id, dow_mask, start_time, end_time,
+                       date_start, date_end, priority, rotation_seconds, group_id) VALUES (?,?,?,?,?,?,?,?,?,?)');
+        foreach ($windows as [$st, $en]) {
+            $ins->execute([
+                $screenId, (int) $_POST['playlist_id'], $mask ?: 127, $st, $en,
                 ($_POST['date_start'] ?? '') ?: null, ($_POST['date_end'] ?? '') ?: null,
-                (int) ($_POST['priority'] ?? 0), $rot,
+                (int) ($_POST['priority'] ?? 0), $rot, $groupId,
             ]);
-        touch_screen((int) $_POST['screen_id']);
-        flash('Schedule added.');
-        redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
+        }
+        touch_screen($screenId);
+        flash(count($windows) > 1 ? 'Schedule added (' . count($windows) . ' OR\'d time windows).' : 'Schedule added.');
+        redirect('index.php?page=screen&id=' . $screenId);
 
     case 'schedule_update':
+        $screenId = (int) $_POST['screen_id'];
+        $groupId  = (string) $_POST['group_id'];
+        $windows  = schedule_windows_from_post($_POST);
+        if (!$windows) { flash('At least one time window is required.'); redirect('index.php?page=screen&id=' . $screenId); }
         $mask = 0;
         foreach ($_POST['dow'] ?? [] as $d) { $mask |= 1 << (int) $d; }
-        $st = preg_match('/^\d{2}:\d{2}$/', $_POST['start_time'] ?? '') ? $_POST['start_time'] : '00:00';
-        $en = preg_match('/^\d{2}:\d{2}$/', $_POST['end_time'] ?? '')   ? $_POST['end_time']   : '24:00';
         $rot = ($_POST['rotation_seconds'] ?? '') !== '' ? (float) $_POST['rotation_seconds'] : null;
         if ($rot !== null && $rot < ROTATION_DEFAULT_SECONDS) { $rot = ROTATION_DEFAULT_SECONDS; }
-        $pdo->prepare('UPDATE schedules SET playlist_id=?, dow_mask=?, start_time=?, end_time=?,
-                       date_start=?, date_end=?, priority=?, rotation_seconds=? WHERE id=? AND screen_id=?')
-            ->execute([
-                (int) $_POST['playlist_id'], $mask ?: 127, $st, $en,
+        // Window count can change on edit — simplest correct approach is replace-in-place
+        // rather than trying to diff old/new rows.
+        $pdo->beginTransaction();
+        $pdo->prepare('DELETE FROM schedules WHERE group_id=? AND screen_id=?')->execute([$groupId, $screenId]);
+        $ins = $pdo->prepare('INSERT INTO schedules (screen_id, playlist_id, dow_mask, start_time, end_time,
+                       date_start, date_end, priority, rotation_seconds, group_id) VALUES (?,?,?,?,?,?,?,?,?,?)');
+        foreach ($windows as [$st, $en]) {
+            $ins->execute([
+                $screenId, (int) $_POST['playlist_id'], $mask ?: 127, $st, $en,
                 ($_POST['date_start'] ?? '') ?: null, ($_POST['date_end'] ?? '') ?: null,
-                (int) ($_POST['priority'] ?? 0), $rot,
-                (int) $_POST['id'], (int) $_POST['screen_id'],
+                (int) ($_POST['priority'] ?? 0), $rot, $groupId,
             ]);
-        touch_screen((int) $_POST['screen_id']);
+        }
+        $pdo->commit();
+        touch_screen($screenId);
         flash('Schedule updated.');
-        redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
+        redirect('index.php?page=screen&id=' . $screenId);
 
     case 'schedule_delete':
-        $pdo->prepare('DELETE FROM schedules WHERE id=?')->execute([(int) $_POST['id']]);
+        $pdo->prepare('DELETE FROM schedules WHERE group_id=? AND screen_id=?')
+            ->execute([(string) $_POST['group_id'], (int) $_POST['screen_id']]);
         touch_screen((int) $_POST['screen_id']);
         flash('Schedule removed.');
         redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
@@ -446,6 +458,22 @@ function touch_screen(int $id): void
 {
     db()->prepare('UPDATE screens SET updated_at=? WHERE id=?')->execute([now(), $id]);
 }
+
+/** Pull the (up to MAX_SCHEDULE_WINDOWS) win_start[]/win_end[] pairs off a schedule
+ *  add/update POST, dropping any slot left blank or malformed. */
+function schedule_windows_from_post(array $post): array
+{
+    $starts = $post['win_start'] ?? [];
+    $ends   = $post['win_end'] ?? [];
+    $windows = [];
+    foreach ($starts as $i => $st) {
+        $en = $ends[$i] ?? '';
+        if (preg_match('/^\d{2}:\d{2}$/', (string) $st) && preg_match('/^\d{2}:\d{2}$/', (string) $en)) {
+            $windows[] = [$st, $en];
+        }
+    }
+    return $windows;
+}
 function move_item(int $id, int $pid, int $dir): void
 {
     $pdo = db();
@@ -699,27 +727,36 @@ if ($page === 'screen') {
                             JOIN playlists p ON p.id = sc.playlist_id
                             WHERE sc.screen_id=? ORDER BY sc.priority DESC, sc.start_time');
       $sch->execute([$s['id']]);
-      $sch = $sch->fetchAll();
-      $editScheduleId = (int) ($_GET['edit_schedule'] ?? 0);
-      if ($sch): ?>
+      // Rows sharing a group_id are OR'd time windows of one admin-facing rule — see
+      // MAX_SCHEDULE_WINDOWS. Bucketing preserves the priority/start_time order above.
+      $schGroups = [];
+      foreach ($sch->fetchAll() as $r) { $schGroups[$r['group_id']][] = $r; }
+      $editGroupId = (string) ($_GET['edit_schedule'] ?? '');
+      if ($schGroups): ?>
       <table>
         <tr><th>Playlist</th><th>Days</th><th>Time</th><th>Date range</th><th>Priority</th><th>Rotation</th><th></th></tr>
-        <?php foreach ($sch as $r): if ((int) $r['id'] === $editScheduleId): ?>
+        <?php foreach ($schGroups as $gid => $rows): $r = $rows[0]; if ($gid === $editGroupId): ?>
         <tr>
           <td colspan="7">
             <form method="post" class="grid">
               <input type="hidden" name="csrf" value="<?= $csrf ?>">
               <input type="hidden" name="action" value="schedule_update">
-              <input type="hidden" name="id" value="<?= $r['id'] ?>">
+              <input type="hidden" name="group_id" value="<?= e($gid) ?>">
               <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
               <label>Playlist
                 <select name="playlist_id"><?php foreach ($allPlaylists as $p): ?>
                   <option value="<?= $p['id'] ?>" <?= (int) $r['playlist_id'] === (int) $p['id'] ? 'selected' : '' ?>><?= e($p['name']) ?></option>
                 <?php endforeach ?></select>
               </label>
-              <label>From <input type="time" name="start_time" value="<?= e($r['start_time']) ?>" required></label>
-              <label>Until <span class="hint">earlier than From = overnight</span>
-                <input type="time" name="end_time" value="<?= e($r['end_time']) ?>" required></label>
+              <fieldset class="wide"><legend>Time windows <span class="hint">OR'd — e.g. 08:00–09:00 and 14:00–15:00; leave a pair blank to skip it</span></legend>
+                <?php for ($w = 0; $w < MAX_SCHEDULE_WINDOWS; $w++): ?>
+                  <span class="window-pair">
+                    <input type="time" name="win_start[]" value="<?= e($rows[$w]['start_time'] ?? '') ?>" <?= $w === 0 ? 'required' : '' ?>>
+                    <span class="hint">–</span>
+                    <input type="time" name="win_end[]" value="<?= e($rows[$w]['end_time'] ?? '') ?>">
+                  </span>
+                <?php endfor ?>
+              </fieldset>
               <label>Priority <span class="hint">higher wins on overlap</span>
                 <input type="number" name="priority" value="<?= (int) $r['priority'] ?>" style="width:5em"></label>
               <label>Rotation (s) <span class="hint">min/blank = <?= round(ROTATION_DEFAULT_SECONDS) ?>s</span>
@@ -745,16 +782,20 @@ if ($page === 'screen') {
         <tr>
           <td><a href="index.php?page=playlist&id=<?= $r['playlist_id'] ?>"><?= e($r['pname']) ?></a></td>
           <td><?= dow_label((int) $r['dow_mask']) ?></td>
-          <td><?= e($r['start_time']) ?>–<?= e($r['end_time']) ?><?= $r['start_time'] > $r['end_time'] ? ' <span class="hint">(overnight)</span>' : '' ?></td>
+          <td><?= implode(' <span class="hint">OR</span> ', array_map(
+                static fn ($w) => e($w['start_time']) . '–' . e($w['end_time'])
+                    . ($w['start_time'] > $w['end_time'] ? ' <span class="hint">(overnight)</span>' : ''),
+                $rows
+              )) ?></td>
           <td class="muted"><?= $r['date_start'] || $r['date_end'] ? e(($r['date_start'] ?? '…') . ' → ' . ($r['date_end'] ?? '…')) : 'always' ?></td>
           <td><?= (int) $r['priority'] ?></td>
           <td class="muted"><?= $r['rotation_seconds'] !== null ? (float) $r['rotation_seconds'] . ' s' : round(ROTATION_DEFAULT_SECONDS) . ' s (default)' ?>
             <span class="hint">if tied</span></td>
           <td class="row">
-            <a class="btn ghost sm" href="index.php?page=screen&id=<?= $s['id'] ?>&edit_schedule=<?= $r['id'] ?>#schedules">edit</a>
+            <a class="btn ghost sm" href="index.php?page=screen&id=<?= $s['id'] ?>&edit_schedule=<?= e($gid) ?>#schedules">edit</a>
             <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>">
               <input type="hidden" name="action" value="schedule_delete">
-              <input type="hidden" name="id" value="<?= $r['id'] ?>">
+              <input type="hidden" name="group_id" value="<?= e($gid) ?>">
               <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
               <button class="danger sm">remove</button></form>
           </td>
@@ -776,9 +817,15 @@ if ($page === 'screen') {
             <option value="<?= $p['id'] ?>"><?= e($p['name']) ?></option><?php endforeach ?>
           </select>
         </label>
-        <label>From <input type="time" name="start_time" value="09:00" required></label>
-        <label>Until <span class="hint">earlier than From = overnight</span>
-          <input type="time" name="end_time" value="18:00" required></label>
+        <fieldset class="wide"><legend>Time windows <span class="hint">OR'd — e.g. 08:00–09:00 and 14:00–15:00; leave a pair blank to skip it</span></legend>
+          <?php for ($w = 0; $w < MAX_SCHEDULE_WINDOWS; $w++): ?>
+            <span class="window-pair">
+              <input type="time" name="win_start[]" value="<?= $w === 0 ? '09:00' : '' ?>" <?= $w === 0 ? 'required' : '' ?>>
+              <span class="hint">–</span>
+              <input type="time" name="win_end[]" value="<?= $w === 0 ? '18:00' : '' ?>">
+            </span>
+          <?php endfor ?>
+        </fieldset>
         <label>Priority <span class="hint">higher wins on overlap</span>
           <input type="number" name="priority" value="0" style="width:5em"></label>
         <label>Rotation (s) <span class="hint">only used if tied with another schedule; min/blank = <?= round(ROTATION_DEFAULT_SECONDS) ?>s</span>
