@@ -90,9 +90,9 @@ button, .btn {
   padding: 8px 16px; font: 600 14px var(--sans); cursor: pointer; display: inline-block;
 }
 button:hover, .btn:hover { filter: brightness(1.1); text-decoration: none; }
-button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
-button.danger { background: transparent; color: var(--warn); border: 1px solid #e6675a55; }
-button.sm { padding: 3px 9px; font-size: 12px; }
+button.ghost, .btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button.danger, .btn.danger { background: transparent; color: var(--warn); border: 1px solid #e6675a55; }
+button.sm, .btn.sm { padding: 3px 9px; font-size: 12px; }
 button:disabled { opacity: .35; cursor: default; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 

@@ -127,6 +127,25 @@ if ($action !== null) {
         flash('Schedule added.');
         redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
 
+    case 'schedule_update':
+        $mask = 0;
+        foreach ($_POST['dow'] ?? [] as $d) { $mask |= 1 << (int) $d; }
+        $st = preg_match('/^\d{2}:\d{2}$/', $_POST['start_time'] ?? '') ? $_POST['start_time'] : '00:00';
+        $en = preg_match('/^\d{2}:\d{2}$/', $_POST['end_time'] ?? '')   ? $_POST['end_time']   : '24:00';
+        $rot = ($_POST['rotation_seconds'] ?? '') !== '' ? (float) $_POST['rotation_seconds'] : null;
+        if ($rot !== null && $rot < ROTATION_DEFAULT_SECONDS) { $rot = ROTATION_DEFAULT_SECONDS; }
+        $pdo->prepare('UPDATE schedules SET playlist_id=?, dow_mask=?, start_time=?, end_time=?,
+                       date_start=?, date_end=?, priority=?, rotation_seconds=? WHERE id=? AND screen_id=?')
+            ->execute([
+                (int) $_POST['playlist_id'], $mask ?: 127, $st, $en,
+                ($_POST['date_start'] ?? '') ?: null, ($_POST['date_end'] ?? '') ?: null,
+                (int) ($_POST['priority'] ?? 0), $rot,
+                (int) $_POST['id'], (int) $_POST['screen_id'],
+            ]);
+        touch_screen((int) $_POST['screen_id']);
+        flash('Schedule updated.');
+        redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
+
     case 'schedule_delete':
         $pdo->prepare('DELETE FROM schedules WHERE id=?')->execute([(int) $_POST['id']]);
         touch_screen((int) $_POST['screen_id']);
@@ -673,7 +692,7 @@ if ($page === 'screen') {
       </form>
     </section>
 
-    <section class="card">
+    <section class="card" id="schedules">
       <h2>Schedules</h2>
       <?php
       $sch = $pdo->prepare('SELECT sc.*, p.name AS pname FROM schedules sc
@@ -681,19 +700,58 @@ if ($page === 'screen') {
                             WHERE sc.screen_id=? ORDER BY sc.priority DESC, sc.start_time');
       $sch->execute([$s['id']]);
       $sch = $sch->fetchAll();
+      $editScheduleId = (int) ($_GET['edit_schedule'] ?? 0);
       if ($sch): ?>
       <table>
         <tr><th>Playlist</th><th>Days</th><th>Time</th><th>Date range</th><th>Priority</th><th>Rotation</th><th></th></tr>
-        <?php foreach ($sch as $r): ?>
+        <?php foreach ($sch as $r): if ((int) $r['id'] === $editScheduleId): ?>
         <tr>
-          <td><?= e($r['pname']) ?></td>
+          <td colspan="7">
+            <form method="post" class="grid">
+              <input type="hidden" name="csrf" value="<?= $csrf ?>">
+              <input type="hidden" name="action" value="schedule_update">
+              <input type="hidden" name="id" value="<?= $r['id'] ?>">
+              <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
+              <label>Playlist
+                <select name="playlist_id"><?php foreach ($allPlaylists as $p): ?>
+                  <option value="<?= $p['id'] ?>" <?= (int) $r['playlist_id'] === (int) $p['id'] ? 'selected' : '' ?>><?= e($p['name']) ?></option>
+                <?php endforeach ?></select>
+              </label>
+              <label>From <input type="time" name="start_time" value="<?= e($r['start_time']) ?>" required></label>
+              <label>Until <span class="hint">earlier than From = overnight</span>
+                <input type="time" name="end_time" value="<?= e($r['end_time']) ?>" required></label>
+              <label>Priority <span class="hint">higher wins on overlap</span>
+                <input type="number" name="priority" value="<?= (int) $r['priority'] ?>" style="width:5em"></label>
+              <label>Rotation (s) <span class="hint">min/blank = <?= round(ROTATION_DEFAULT_SECONDS) ?>s</span>
+                <input type="number" step="1" min="<?= round(ROTATION_DEFAULT_SECONDS) ?>" name="rotation_seconds"
+                       value="<?= e($r['rotation_seconds'] !== null ? (string) (float) $r['rotation_seconds'] : '') ?>"
+                       placeholder="<?= round(ROTATION_DEFAULT_SECONDS) ?>" style="width:6em"></label>
+              <fieldset class="wide"><legend>Days</legend>
+                <?php foreach (['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as $i => $d): ?>
+                  <label class="inline"><input type="checkbox" name="dow[]" value="<?= $i ?>"
+                    <?= (int) $r['dow_mask'] >> $i & 1 ? 'checked' : '' ?>> <?= $d ?></label>
+                <?php endforeach ?>
+              </fieldset>
+              <label>Start date <span class="hint">optional</span> <input type="date" name="date_start" value="<?= e($r['date_start'] ?? '') ?>"></label>
+              <label>End date <span class="hint">optional, inclusive</span> <input type="date" name="date_end" value="<?= e($r['date_end'] ?? '') ?>"></label>
+              <div class="row">
+                <button>Save</button>
+                <a class="btn ghost" href="index.php?page=screen&id=<?= $s['id'] ?>#schedules">Cancel</a>
+              </div>
+            </form>
+          </td>
+        </tr>
+        <?php else: ?>
+        <tr>
+          <td><a href="index.php?page=playlist&id=<?= $r['playlist_id'] ?>"><?= e($r['pname']) ?></a></td>
           <td><?= dow_label((int) $r['dow_mask']) ?></td>
           <td><?= e($r['start_time']) ?>–<?= e($r['end_time']) ?><?= $r['start_time'] > $r['end_time'] ? ' <span class="hint">(overnight)</span>' : '' ?></td>
           <td class="muted"><?= $r['date_start'] || $r['date_end'] ? e(($r['date_start'] ?? '…') . ' → ' . ($r['date_end'] ?? '…')) : 'always' ?></td>
           <td><?= (int) $r['priority'] ?></td>
           <td class="muted"><?= $r['rotation_seconds'] !== null ? (float) $r['rotation_seconds'] . ' s' : round(ROTATION_DEFAULT_SECONDS) . ' s (default)' ?>
             <span class="hint">if tied</span></td>
-          <td>
+          <td class="row">
+            <a class="btn ghost sm" href="index.php?page=screen&id=<?= $s['id'] ?>&edit_schedule=<?= $r['id'] ?>#schedules">edit</a>
             <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>">
               <input type="hidden" name="action" value="schedule_delete">
               <input type="hidden" name="id" value="<?= $r['id'] ?>">
@@ -701,7 +759,7 @@ if ($page === 'screen') {
               <button class="danger sm">remove</button></form>
           </td>
         </tr>
-        <?php endforeach ?>
+        <?php endif; endforeach ?>
       </table>
       <?php else: ?><p class="empty">No schedules — the fallback playlist (if set) plays 24/7.</p><?php endif ?>
 
