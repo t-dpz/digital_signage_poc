@@ -1,0 +1,9 @@
+# Install as /etc/sudoers.d/signage-agent (chmod 0440, validate with `visudo -c`).
+#
+# Grants the low-privileged signage-agent user exactly the two commands the
+# agent needs, as exact full command lines (no wildcards) — a compromised
+# agent process can restart the one named kiosk unit or reboot, and nothing
+# else (can't read arbitrary root-owned files, run arbitrary root commands,
+# install persistence, etc). Adjust the unit name if KIOSK_UNIT differs.
+
+signage-agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart signage-kiosk.service, /usr/bin/systemctl reboot

@@ -1,0 +1,15 @@
+[Unit]
+Description=Signage remote-command agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=signage-agent
+EnvironmentFile=/etc/signage-agent.conf
+ExecStart=/opt/signage-agent/signage-agent.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

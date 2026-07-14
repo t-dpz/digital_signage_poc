@@ -106,22 +106,39 @@ async function refreshManifest() {
 
 /* -------------------------------------------------- schedule resolution -- */
 
+const ROTATION_DEFAULT_SECONDS = 120;
+
 function activePlaylistId(m, d = new Date()) {
   const dow  = (d.getDay() + 6) % 7;                  // 0 = Monday
   const yDow = (dow + 6) % 7;
   const t    = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
   const date = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
              + '-' + String(d.getDate()).padStart(2, '0');
-  let best = null;
+  const active = [];
   for (const s of (m.schedules || [])) {
     if (s.from  && date < s.from)  continue;
     if (s.until && date > s.until) continue;
     let hit;
     if (s.start <= s.end) hit = (s.dow >> dow & 1) && t >= s.start && t < s.end;
     else hit = ((s.dow >> dow & 1) && t >= s.start) || ((s.dow >> yDow & 1) && t < s.end);
-    if (hit && (best === null || s.priority > best.priority)) best = s;
+    if (hit) active.push(s);
   }
-  return best ? best.playlist : m.fallback_playlist;
+  if (!active.length) return m.fallback_playlist;
+  // Highest priority wins; if several schedules are tied (same day/time/priority),
+  // rotate between them by wall-clock time — mirrors PHP resolve_active_playlist()/rotate_tied().
+  const top  = Math.max(...active.map(s => s.priority));
+  const tied = active.filter(s => s.priority === top);
+  if (tied.length === 1) return tied[0].playlist;
+  const durations = tied.map(s => s.rotation ?? ROTATION_DEFAULT_SECONDS);
+  const total = durations.reduce((a, b) => a + b, 0);
+  if (total <= 0) return tied[0].playlist;
+  const cursor = Math.floor(d.getTime() / 1000) % total;
+  let acc = 0;
+  for (let i = 0; i < tied.length; i++) {
+    acc += durations[i];
+    if (cursor < acc) return tied[i].playlist;
+  }
+  return tied[tied.length - 1].playlist;
 }
 
 /* ------------------------------------------------------- media caching -- */

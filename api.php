@@ -4,6 +4,7 @@
  *
  *   GET  api.php?action=manifest&token=…   → schedule + playlists (ETag/304)
  *   POST api.php?action=heartbeat&token=…  → liveness + player state
+ *   GET  api.php?action=command&token=…    → fetch + clear pending command (companion agent)
  */
 declare(strict_types=1);
 require __DIR__ . '/lib.php';
@@ -25,6 +26,12 @@ if ($action === 'heartbeat' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $stmt->execute([now(), $info, $screen['id']]);
     header('Content-Type: application/json');
     exit(json_encode(['ok' => true]));
+}
+
+if ($action === 'command') {
+    $cmd = screen_command_fetch_and_clear((int) $screen['id']);
+    header('Content-Type: application/json');
+    exit(json_encode(['command' => $cmd['command'] ?? null]));
 }
 
 if ($action === 'manifest') {

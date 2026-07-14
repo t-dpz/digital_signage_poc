@@ -9,6 +9,15 @@ $pdo    = db();
 $page   = $_GET['page'] ?? 'screens';
 $action = $_POST['action'] ?? null;
 
+// PHP silently empties $_POST/$_FILES (no warning to the app) when a POST body
+// exceeds post_max_size — most relevant to the chunked upload endpoints, since a
+// misconfigured/stock php.ini could cap post_max_size below UPLOAD_CHUNK_BYTES.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$_POST && !$_FILES && (int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+    http_response_code(413);
+    header('Content-Type: application/json');
+    exit(json_encode(['error' => 'Request body exceeds the server\'s post_max_size/upload_max_filesize (php.ini).']));
+}
+
 /* ----------------------------------------------------------------- login -- */
 
 if ($page === 'login') {
@@ -57,13 +66,21 @@ if ($action !== null) {
         $name = trim($_POST['name'] ?? '');
         $fallback = ($_POST['fallback_playlist_id'] ?? '') !== '' ? (int) $_POST['fallback_playlist_id'] : null;
         if ($name === '') { flash('Screen needs a name.'); redirect('index.php'); }
+        $powerDriver = array_key_exists($_POST['power_driver'] ?? '', POWER_DRIVERS) ? $_POST['power_driver'] : '';
+        $powerHost   = trim($_POST['power_host'] ?? '');
+        $powerPort   = ($_POST['power_port'] ?? '') !== '' ? (int) $_POST['power_port'] : null;
+        $powerMac    = trim($_POST['power_mac'] ?? '');
         if ($id) {
-            $pdo->prepare('UPDATE screens SET name=?, notes=?, fallback_playlist_id=?, updated_at=? WHERE id=?')
-                ->execute([$name, trim($_POST['notes'] ?? ''), $fallback, now(), $id]);
+            $pdo->prepare('UPDATE screens SET name=?, notes=?, fallback_playlist_id=?,
+                           power_driver=?, power_host=?, power_port=?, power_mac=?, updated_at=? WHERE id=?')
+                ->execute([$name, trim($_POST['notes'] ?? ''), $fallback,
+                           $powerDriver, $powerHost, $powerPort, $powerMac, now(), $id]);
         } else {
-            $pdo->prepare('INSERT INTO screens (name, token, notes, fallback_playlist_id, updated_at, created_at)
-                           VALUES (?,?,?,?,?,?)')
-                ->execute([$name, bin2hex(random_bytes(16)), trim($_POST['notes'] ?? ''), $fallback, now(), now()]);
+            $pdo->prepare('INSERT INTO screens (name, token, notes, fallback_playlist_id,
+                           power_driver, power_host, power_port, power_mac, updated_at, created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?)')
+                ->execute([$name, bin2hex(random_bytes(16)), trim($_POST['notes'] ?? ''), $fallback,
+                           $powerDriver, $powerHost, $powerPort, $powerMac, now(), now()]);
             $id = (int) $pdo->lastInsertId();
         }
         flash('Screen saved.');
@@ -80,18 +97,31 @@ if ($action !== null) {
         flash('Screen deleted.');
         redirect('index.php');
 
+    case 'screen_command':
+        $cmd = $_POST['command'] ?? '';
+        if (!in_array($cmd, ['restart_kiosk', 'reboot'], true)) {
+            flash('Unknown command.');
+            redirect('index.php?page=screen&id=' . (int) $_POST['id']);
+        }
+        screen_command_issue((int) $_POST['id'], $cmd);
+        flash($cmd === 'reboot' ? 'Reboot queued — will apply next time the device checks in.'
+                                 : 'Kiosk restart queued — will apply next time the device checks in.');
+        redirect('index.php?page=screen&id=' . (int) $_POST['id']);
+
     case 'schedule_add':
         $mask = 0;
         foreach ($_POST['dow'] ?? [] as $d) { $mask |= 1 << (int) $d; }
         $st = preg_match('/^\d{2}:\d{2}$/', $_POST['start_time'] ?? '') ? $_POST['start_time'] : '00:00';
         $en = preg_match('/^\d{2}:\d{2}$/', $_POST['end_time'] ?? '')   ? $_POST['end_time']   : '24:00';
+        $rot = ($_POST['rotation_seconds'] ?? '') !== '' ? (float) $_POST['rotation_seconds'] : null;
+        if ($rot !== null && $rot < ROTATION_DEFAULT_SECONDS) { $rot = ROTATION_DEFAULT_SECONDS; }
         $pdo->prepare('INSERT INTO schedules (screen_id, playlist_id, dow_mask, start_time, end_time,
-                       date_start, date_end, priority) VALUES (?,?,?,?,?,?,?,?)')
+                       date_start, date_end, priority, rotation_seconds) VALUES (?,?,?,?,?,?,?,?,?)')
             ->execute([
                 (int) $_POST['screen_id'], (int) $_POST['playlist_id'],
                 $mask ?: 127, $st, $en,
                 ($_POST['date_start'] ?? '') ?: null, ($_POST['date_end'] ?? '') ?: null,
-                (int) ($_POST['priority'] ?? 0),
+                (int) ($_POST['priority'] ?? 0), $rot,
             ]);
         touch_screen((int) $_POST['screen_id']);
         flash('Schedule added.');
@@ -101,6 +131,22 @@ if ($action !== null) {
         $pdo->prepare('DELETE FROM schedules WHERE id=?')->execute([(int) $_POST['id']]);
         touch_screen((int) $_POST['screen_id']);
         flash('Schedule removed.');
+        redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
+
+    case 'power_schedule_add':
+        $mask = 0;
+        foreach ($_POST['dow'] ?? [] as $d) { $mask |= 1 << (int) $d; }
+        $st = preg_match('/^\d{2}:\d{2}$/', $_POST['start_time'] ?? '') ? $_POST['start_time'] : '08:00';
+        $en = preg_match('/^\d{2}:\d{2}$/', $_POST['end_time'] ?? '')   ? $_POST['end_time']   : '18:00';
+        $pdo->prepare('INSERT INTO power_schedules (screen_id, dow_mask, start_time, end_time, created_at)
+                       VALUES (?,?,?,?,?)')
+            ->execute([(int) $_POST['screen_id'], $mask ?: 127, $st, $en, now()]);
+        flash('Power window added.');
+        redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
+
+    case 'power_schedule_delete':
+        $pdo->prepare('DELETE FROM power_schedules WHERE id=?')->execute([(int) $_POST['id']]);
+        flash('Power window removed.');
         redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
 
     case 'content_upload':
@@ -129,6 +175,123 @@ if ($action !== null) {
         }
         flash($ok . ' file(s) uploaded.' . ($failed ? ' Failed: ' . implode(', ', $failed) : ''));
         redirect('index.php?page=content');
+
+    /* Chunked/resumable upload, driven by assets/admin.js. Falls back transparently
+       to the plain content_upload form post above if JS/fetch is unavailable. */
+
+    case 'content_upload_init':
+        upload_sweep_stale();
+        header('Content-Type: application/json');
+        $filename = trim((string) ($_POST['filename'] ?? ''));
+        $size     = (int) ($_POST['size'] ?? 0);
+        $folderId = ($_POST['folder_id'] ?? '') !== '' ? (int) $_POST['folder_id'] : ensure_unsorted_folder($pdo);
+        if ($filename === '' || $size <= 0) {
+            http_response_code(400);
+            exit(json_encode(['error' => 'Bad filename/size.']));
+        }
+        $id  = bin2hex(random_bytes(16));
+        $dir = upload_tmp_dir($id);
+        mkdir($dir, 0775, true);
+        file_put_contents($dir . '/meta.json', json_encode([
+            'filename' => $filename, 'size' => $size, 'folder_id' => $folderId, 'created_at' => now(),
+        ]));
+        exit(json_encode(['upload_id' => $id, 'chunk_size' => UPLOAD_CHUNK_BYTES]));
+
+    case 'content_upload_status':
+        header('Content-Type: application/json');
+        $id  = (string) ($_POST['upload_id'] ?? '');
+        $dir = upload_tmp_dir($id);
+        if (!preg_match('/^[a-f0-9]{32}$/', $id) || !is_file($dir . '/meta.json')) {
+            http_response_code(404);
+            exit(json_encode(['error' => 'unknown upload']));
+        }
+        $received = [];
+        foreach (glob($dir . '/*.part') ?: [] as $f) {
+            $received[] = (int) basename($f, '.part');
+        }
+        sort($received);
+        exit(json_encode(['received' => $received]));
+
+    case 'content_upload_chunk':
+        header('Content-Type: application/json');
+        $id  = (string) ($_POST['upload_id'] ?? '');
+        $idx = (int) ($_POST['index'] ?? -1);
+        $dir = upload_tmp_dir($id);
+        if (!preg_match('/^[a-f0-9]{32}$/', $id) || !is_file($dir . '/meta.json') || $idx < 0) {
+            http_response_code(404);
+            exit(json_encode(['error' => 'unknown upload']));
+        }
+        $chunk = $_FILES['chunk'] ?? null;
+        if (!$chunk || $chunk['error'] !== UPLOAD_ERR_OK) {
+            http_response_code(400);
+            exit(json_encode(['error' => 'chunk upload failed']));
+        }
+        if (!move_uploaded_file($chunk['tmp_name'], $dir . '/' . $idx . '.part')) {
+            http_response_code(500);
+            exit(json_encode(['error' => 'could not store chunk']));
+        }
+        exit(json_encode(['ok' => true]));
+
+    case 'content_upload_finish':
+        header('Content-Type: application/json');
+        $id   = (string) ($_POST['upload_id'] ?? '');
+        $dir  = upload_tmp_dir($id);
+        $meta = is_file($dir . '/meta.json') ? json_decode((string) file_get_contents($dir . '/meta.json'), true) : null;
+        if (!preg_match('/^[a-f0-9]{32}$/', $id) || !$meta) {
+            http_response_code(404);
+            exit(json_encode(['error' => 'unknown upload']));
+        }
+        set_time_limit(0); // assembling a multi-GB file from chunks can outrun the default limit
+        $expected = (int) ceil($meta['size'] / UPLOAD_CHUNK_BYTES);
+        for ($i = 0; $i < $expected; $i++) {
+            if (!is_file("$dir/$i.part")) {
+                http_response_code(409);
+                exit(json_encode(['error' => "missing chunk $i"]));
+            }
+        }
+        $assembled = $dir . '/assembled.bin';
+        $out = fopen($assembled, 'wb');
+        $total = 0;
+        for ($i = 0; $i < $expected; $i++) {
+            $in = fopen("$dir/$i.part", 'rb');
+            while (!feof($in)) { $buf = fread($in, 1024 * 1024); $total += strlen($buf); fwrite($out, $buf); }
+            fclose($in);
+        }
+        fclose($out);
+        if ($total !== (int) $meta['size']) {
+            upload_tmp_rm($dir);
+            http_response_code(409);
+            exit(json_encode(['error' => 'size mismatch — please retry the upload']));
+        }
+        $mime = mime_content_type($assembled) ?: '';
+        $ext  = cfg('allowed_mime')[$mime] ?? null;
+        if (!$ext) {
+            upload_tmp_rm($dir);
+            http_response_code(415);
+            exit(json_encode(['error' => "$mime not allowed"]));
+        }
+        $hash = sha1_file($assembled);
+        $name = $hash . '.' . $ext;
+        $dest = storage_path('media/' . $name);
+        if (!file_exists($dest)) {
+            rename($assembled, $dest);
+        }
+        $type = str_starts_with($mime, 'video/') ? 'video' : 'image';
+        $dur  = $type === 'video' ? probe_duration($dest) : null;
+        $title = pathinfo((string) $meta['filename'], PATHINFO_FILENAME) ?: $name;
+        $pdo->prepare('INSERT INTO content (type, title, filename, mime, size, duration, folder_id, created_at)
+                       VALUES (?,?,?,?,?,?,?,?)')
+            ->execute([$type, $title, $name, $mime, filesize($dest), $dur, (int) $meta['folder_id'], now()]);
+        upload_tmp_rm($dir);
+        exit(json_encode(['ok' => true, 'title' => $title]));
+
+    case 'content_upload_cancel':
+        header('Content-Type: application/json');
+        $id = (string) ($_POST['upload_id'] ?? '');
+        if (preg_match('/^[a-f0-9]{32}$/', $id)) {
+            upload_tmp_rm(upload_tmp_dir($id));
+        }
+        exit(json_encode(['ok' => true]));
 
     case 'content_url':
         $url = trim($_POST['url'] ?? '');
@@ -346,13 +509,16 @@ if ($page === 'screens') {
       <tr><th>Status</th><th>Name</th><th>Now playing</th><th>Last seen</th><th>Player URL</th></tr>
       <?php foreach ($screens as $s):
           $online = $s['last_seen'] && (now() - $s['last_seen']) < cfg('player_refresh') * 2.5;
+          $powerOn = power_should_be_on((int) $s['id']);
+          $asleep = !$online && $powerOn === false;
           $m = build_manifest($s);
           $active = resolve_active_playlist($m);
           $activeName = null;
           foreach ($allPlaylists as $p) { if ((int) $p['id'] === $active) { $activeName = $p['name']; } }
           $url = 'player.php?token=' . $s['token']; ?>
       <tr>
-        <td><span class="dot <?= $online ? 'ok' : '' ?>"></span><?= $online ? 'online' : 'offline' ?></td>
+        <td><span class="dot <?= $online ? 'ok' : ($asleep ? 'zzz' : '') ?>"></span><?=
+              $online ? 'online' : ($asleep ? 'asleep (scheduled off)' : 'offline') ?></td>
         <td><a href="index.php?page=screen&id=<?= $s['id'] ?>"><?= e($s['name']) ?></a></td>
         <td><?= $activeName ? e($activeName) : '<span class="muted">nothing scheduled</span>' ?></td>
         <td class="muted"><?= $s['last_seen'] ? date('d M H:i', (int) $s['last_seen']) : 'never' ?></td>
@@ -393,6 +559,18 @@ if ($page === 'screen') {
           </select>
         </label>
         <label class="wide">Notes <input name="notes" value="<?= e($s['notes'] ?? '') ?>" placeholder="location, switch port, …"></label>
+        <label>Power control <span class="hint">LAN protocol used to switch the panel on/off — see the Panel power card below</span>
+          <select name="power_driver">
+            <?php foreach (POWER_DRIVERS as $key => $label): ?>
+              <option value="<?= e($key) ?>" <?= ($s['power_driver'] ?? '') === $key ? 'selected' : '' ?>><?= e($label) ?></option>
+            <?php endforeach ?>
+          </select>
+        </label>
+        <label>Power IP/host <input name="power_host" value="<?= e($s['power_host'] ?? '') ?>" placeholder="192.168.1.50"></label>
+        <label>Power port <span class="hint">blank = driver default</span>
+          <input name="power_port" type="number" min="1" max="65535" value="<?= e((string) ($s['power_port'] ?? '')) ?>"></label>
+        <label>Power MAC <span class="hint">for Wake-on-LAN</span>
+          <input name="power_mac" value="<?= e($s['power_mac'] ?? '') ?>" placeholder="aa:bb:cc:dd:ee:ff"></label>
         <button>Save screen</button>
       </form>
     </section>
@@ -420,6 +598,82 @@ if ($page === 'screen') {
     </section>
 
     <section class="card">
+      <h2>Kiosk control</h2>
+      <?php if ($s['pending_command']): ?>
+        <p class="hint"><?= e($s['pending_command'] === 'reboot' ? 'Reboot' : 'Kiosk restart') ?>
+          queued at <?= date('d M Y H:i:s', (int) $s['pending_command_at']) ?> — waiting for the device to check in.</p>
+      <?php endif ?>
+      <p class="muted">Requires the companion agent running on the device (see
+        <code>agent/README.md</code>). Not supported on Tizen SoC displays.</p>
+      <div class="row">
+        <form method="post" onsubmit="return confirm('Restart the kiosk browser/process on this device? The screen will go blank briefly.')">
+          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_command">
+          <input type="hidden" name="command" value="restart_kiosk"><input type="hidden" name="id" value="<?= $s['id'] ?>">
+          <button class="ghost">Restart kiosk</button>
+        </form>
+        <form method="post" onsubmit="return confirm('Reboot the physical device? It will be offline until it powers back on.')">
+          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_command">
+          <input type="hidden" name="command" value="reboot"><input type="hidden" name="id" value="<?= $s['id'] ?>">
+          <button class="danger">Reboot device</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Panel power</h2>
+      <?php
+      $pwrOn = power_should_be_on((int) $s['id']);
+      $pwrSch = $pdo->prepare('SELECT * FROM power_schedules WHERE screen_id=? ORDER BY start_time');
+      $pwrSch->execute([$s['id']]);
+      $pwrSch = $pwrSch->fetchAll(); ?>
+      <p class="muted">
+        <?php if (!$pwrSch): ?>
+          No power windows set — the panel is never told to switch off.
+        <?php else: ?>
+          Should currently be <strong><?= $pwrOn ? 'ON' : 'OFF' ?></strong> per the windows below.
+        <?php endif ?>
+        <?php if ($s['power_driver'] === ''): ?>
+          <span class="hint">Power control is set to "Not managed" above — nothing will actually send on/off commands yet.</span>
+        <?php endif ?>
+      </p>
+      <?php if ($pwrSch): ?>
+      <table>
+        <tr><th>Days</th><th>On from</th><th>Off at</th><th></th></tr>
+        <?php foreach ($pwrSch as $r): ?>
+        <tr>
+          <td><?= dow_label((int) $r['dow_mask']) ?></td>
+          <td><?= e($r['start_time']) ?></td>
+          <td><?= e($r['end_time']) ?><?= $r['start_time'] > $r['end_time'] ? ' <span class="hint">(overnight)</span>' : '' ?></td>
+          <td>
+            <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>">
+              <input type="hidden" name="action" value="power_schedule_delete">
+              <input type="hidden" name="id" value="<?= $r['id'] ?>">
+              <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
+              <button class="danger sm">remove</button></form>
+          </td>
+        </tr>
+        <?php endforeach ?>
+      </table>
+      <?php endif ?>
+
+      <h3>Add power window</h3>
+      <form method="post" class="grid">
+        <input type="hidden" name="csrf" value="<?= $csrf ?>">
+        <input type="hidden" name="action" value="power_schedule_add">
+        <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
+        <label>On from <input type="time" name="start_time" value="08:00" required></label>
+        <label>Off at <span class="hint">earlier than "On from" = overnight</span>
+          <input type="time" name="end_time" value="18:00" required></label>
+        <fieldset class="wide"><legend>Days</legend>
+          <?php foreach (['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as $i => $d): ?>
+            <label class="inline"><input type="checkbox" name="dow[]" value="<?= $i ?>" checked> <?= $d ?></label>
+          <?php endforeach ?>
+        </fieldset>
+        <button>Add power window</button>
+      </form>
+    </section>
+
+    <section class="card">
       <h2>Schedules</h2>
       <?php
       $sch = $pdo->prepare('SELECT sc.*, p.name AS pname FROM schedules sc
@@ -429,7 +683,7 @@ if ($page === 'screen') {
       $sch = $sch->fetchAll();
       if ($sch): ?>
       <table>
-        <tr><th>Playlist</th><th>Days</th><th>Time</th><th>Date range</th><th>Priority</th><th></th></tr>
+        <tr><th>Playlist</th><th>Days</th><th>Time</th><th>Date range</th><th>Priority</th><th>Rotation</th><th></th></tr>
         <?php foreach ($sch as $r): ?>
         <tr>
           <td><?= e($r['pname']) ?></td>
@@ -437,6 +691,8 @@ if ($page === 'screen') {
           <td><?= e($r['start_time']) ?>–<?= e($r['end_time']) ?><?= $r['start_time'] > $r['end_time'] ? ' <span class="hint">(overnight)</span>' : '' ?></td>
           <td class="muted"><?= $r['date_start'] || $r['date_end'] ? e(($r['date_start'] ?? '…') . ' → ' . ($r['date_end'] ?? '…')) : 'always' ?></td>
           <td><?= (int) $r['priority'] ?></td>
+          <td class="muted"><?= $r['rotation_seconds'] !== null ? (float) $r['rotation_seconds'] . ' s' : round(ROTATION_DEFAULT_SECONDS) . ' s (default)' ?>
+            <span class="hint">if tied</span></td>
           <td>
             <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>">
               <input type="hidden" name="action" value="schedule_delete">
@@ -463,17 +719,19 @@ if ($page === 'screen') {
           </select>
         </label>
         <label>From <input type="time" name="start_time" value="09:00" required></label>
-        <label>Until <input type="time" name="end_time" value="18:00" required>
-          <span class="hint">earlier than From = overnight</span></label>
-        <label>Priority <input type="number" name="priority" value="0" style="width:5em">
-          <span class="hint">higher wins on overlap</span></label>
+        <label>Until <span class="hint">earlier than From = overnight</span>
+          <input type="time" name="end_time" value="18:00" required></label>
+        <label>Priority <span class="hint">higher wins on overlap</span>
+          <input type="number" name="priority" value="0" style="width:5em"></label>
+        <label>Rotation (s) <span class="hint">only used if tied with another schedule; min/blank = <?= round(ROTATION_DEFAULT_SECONDS) ?>s</span>
+          <input type="number" step="1" min="<?= round(ROTATION_DEFAULT_SECONDS) ?>" name="rotation_seconds" placeholder="<?= round(ROTATION_DEFAULT_SECONDS) ?>" style="width:6em"></label>
         <fieldset class="wide"><legend>Days</legend>
           <?php foreach (['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as $i => $d): ?>
             <label class="inline"><input type="checkbox" name="dow[]" value="<?= $i ?>" checked> <?= $d ?></label>
           <?php endforeach ?>
         </fieldset>
-        <label>Start date <input type="date" name="date_start"> <span class="hint">optional</span></label>
-        <label>End date <input type="date" name="date_end"> <span class="hint">optional, inclusive</span></label>
+        <label>Start date <span class="hint">optional</span> <input type="date" name="date_start"></label>
+        <label>End date <span class="hint">optional, inclusive</span> <input type="date" name="date_end"></label>
         <button>Add schedule</button>
       </form>
       <?php endif ?>
@@ -670,8 +928,11 @@ if ($page === 'content') {
             </select>
           </label>
           <p class="hint">MP4 (H.264) and WebM for video; JPG/PNG/WebP/GIF for images.
-             Max ≈ <?= e(cfg('max_upload_hint')) ?> per request (php.ini).</p>
+             Uploaded in <?= e(human_size(UPLOAD_CHUNK_BYTES)) ?> chunks with resume support, so large video
+             isn't limited by the server's per-request size (php.ini) — a dropped connection just picks up
+             where it left off.</p>
           <button>Upload</button> <span id="uploadBusy" class="hint" hidden>uploading…</span>
+          <div id="uploadList" class="upload-list"></div>
         </form>
       </section>
       <section class="card">

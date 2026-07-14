@@ -1,0 +1,27 @@
+# TEMPLATE — this repo has no existing kiosk-launch mechanism, so this is a
+# starting point only. Adapt the browser binary path/flags and the ExecStart
+# URL per device/distro (chromium vs chromium-browser package naming differs
+# across Debian/RaspiOS/Ubuntu; DISPLAY/Wayland setup varies too).
+#
+# Install as /etc/systemd/system/signage-kiosk.service, then:
+#   systemctl daemon-reload && systemctl enable --now signage-kiosk.service
+#
+# The unit name here ("signage-kiosk.service") must match KIOSK_UNIT in
+# /etc/signage-agent.conf so the agent can restart the right thing.
+
+[Unit]
+Description=Signage kiosk browser (TEMPLATE — adapt binary path/flags per device)
+After=graphical.target
+
+[Service]
+Type=simple
+User=kiosk
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/chromium --kiosk --noerrdialogs --disable-infobars \
+  --autoplay-policy=no-user-gesture-required \
+  https://YOUR-SERVER/player.php?token=YOUR_TOKEN
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

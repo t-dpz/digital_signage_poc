@@ -5,6 +5,21 @@
 declare(strict_types=1);
 
 const SIGNAGE_VERSION = '1.0.0';
+const ROTATION_DEFAULT_SECONDS = 120.0; // schedules tied on day/time/priority rotate at this cadence unless overridden
+// Per-chunk size for content_upload_*. Deliberately under PHP's stock upload_max_filesize/
+// post_max_size (2M/8M) so chunked upload works even without the 2G .htaccess override present.
+const UPLOAD_CHUNK_BYTES = 1024 * 1024;
+
+// Network protocols a screen's panel can be power-cycled over (Tier 2 in the power-schedule
+// design — see CLAUDE.md). '' = not managed here (browser kiosk always on, or Tier 1/3 elsewhere).
+// No driver actually sends commands yet; this just names the config a future cron script reads.
+const POWER_DRIVERS = [
+    ''     => 'Not managed',
+    'mdc'  => 'Samsung MDC (LAN, TCP)',
+    'sicp' => 'Philips SICP (LAN, TCP)',
+    'lg'   => 'LG webOS Signage (LAN)',
+    'wol'  => 'Wake-on-LAN only',
+];
 
 $GLOBALS['cfg'] = require __DIR__ . '/config.php';
 
@@ -56,6 +71,12 @@ CREATE TABLE screens (
     fallback_playlist_id INTEGER REFERENCES playlists(id) ON DELETE SET NULL,
     last_seen            INTEGER,
     player_info          TEXT NOT NULL DEFAULT '',
+    pending_command      TEXT,     -- 'restart_kiosk' | 'reboot' | NULL
+    pending_command_at   INTEGER,  -- unix ts when issued, NULL when none
+    power_driver         TEXT NOT NULL DEFAULT '',  -- key into POWER_DRIVERS; '' = unmanaged
+    power_host           TEXT NOT NULL DEFAULT '',  -- IP/hostname for the LAN control protocol
+    power_port           INTEGER,                   -- TCP port, driver-specific default if NULL
+    power_mac            TEXT NOT NULL DEFAULT '',  -- MAC for Wake-on-LAN
     updated_at           INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
 );
@@ -99,11 +120,23 @@ CREATE TABLE schedules (
     end_time    TEXT NOT NULL DEFAULT '24:00', -- HH:MM, may be < start_time (overnight)
     date_start  TEXT,                          -- YYYY-MM-DD, optional
     date_end    TEXT,                          -- YYYY-MM-DD, optional (inclusive)
-    priority    INTEGER NOT NULL DEFAULT 0
+    priority    INTEGER NOT NULL DEFAULT 0,
+    rotation_seconds REAL                      -- seconds this schedule gets when tied with
+                                                -- another active schedule at equal priority;
+                                                -- NULL = ROTATION_DEFAULT_SECONDS
+);
+CREATE TABLE power_schedules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    screen_id   INTEGER NOT NULL REFERENCES screens(id) ON DELETE CASCADE,
+    dow_mask    INTEGER NOT NULL DEFAULT 127,  -- bit 0 = Monday … bit 6 = Sunday
+    start_time  TEXT NOT NULL DEFAULT '08:00', -- HH:MM, panel should be ON from here…
+    end_time    TEXT NOT NULL DEFAULT '18:00', -- …until here (may be < start_time = overnight)
+    created_at  INTEGER NOT NULL
 );
 CREATE INDEX idx_items_playlist ON playlist_items(playlist_id, position);
 CREATE INDEX idx_sched_screen   ON schedules(screen_id);
 CREATE INDEX idx_content_folder ON content(folder_id);
+CREATE INDEX idx_power_sched_screen ON power_schedules(screen_id);
 SQL);
 }
 
@@ -138,6 +171,47 @@ SQL);
     if ((int) $pdo->query('SELECT COUNT(*) FROM content WHERE folder_id IS NULL')->fetchColumn() > 0) {
         $uid = ensure_unsorted_folder($pdo);
         $pdo->prepare('UPDATE content SET folder_id=? WHERE folder_id IS NULL')->execute([$uid]);
+    }
+    $hasRotation = false;
+    foreach ($pdo->query('PRAGMA table_info(schedules)') as $col) {
+        if ($col['name'] === 'rotation_seconds') { $hasRotation = true; break; }
+    }
+    if (!$hasRotation) {
+        $pdo->exec('ALTER TABLE schedules ADD COLUMN rotation_seconds REAL');
+    }
+    $hasPendingCommand = false;
+    foreach ($pdo->query('PRAGMA table_info(screens)') as $col) {
+        if ($col['name'] === 'pending_command') { $hasPendingCommand = true; break; }
+    }
+    if (!$hasPendingCommand) {
+        $pdo->exec('ALTER TABLE screens ADD COLUMN pending_command TEXT');
+        $pdo->exec('ALTER TABLE screens ADD COLUMN pending_command_at INTEGER');
+    }
+    $hasPowerDriver = false;
+    foreach ($pdo->query('PRAGMA table_info(screens)') as $col) {
+        if ($col['name'] === 'power_driver') { $hasPowerDriver = true; break; }
+    }
+    if (!$hasPowerDriver) {
+        $pdo->exec("ALTER TABLE screens ADD COLUMN power_driver TEXT NOT NULL DEFAULT ''");
+        $pdo->exec("ALTER TABLE screens ADD COLUMN power_host TEXT NOT NULL DEFAULT ''");
+        $pdo->exec('ALTER TABLE screens ADD COLUMN power_port INTEGER');
+        $pdo->exec("ALTER TABLE screens ADD COLUMN power_mac TEXT NOT NULL DEFAULT ''");
+    }
+    $hasPowerSchedules = $pdo->query(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='power_schedules'"
+    )->fetchColumn();
+    if (!$hasPowerSchedules) {
+        $pdo->exec(<<<'SQL'
+CREATE TABLE power_schedules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    screen_id   INTEGER NOT NULL REFERENCES screens(id) ON DELETE CASCADE,
+    dow_mask    INTEGER NOT NULL DEFAULT 127,
+    start_time  TEXT NOT NULL DEFAULT '08:00',
+    end_time    TEXT NOT NULL DEFAULT '18:00',
+    created_at  INTEGER NOT NULL
+);
+SQL);
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_power_sched_screen ON power_schedules(screen_id)');
     }
 }
 
@@ -235,6 +309,42 @@ function human_size(int $bytes): string
     return round($bytes, 1) . ' TB';
 }
 
+/* ------------------------------------------------------- chunked uploads -- */
+
+function upload_tmp_dir(string $id = ''): string
+{
+    return storage_path('uploads' . ($id !== '' ? '/' . $id : ''));
+}
+
+/** Remove a chunk-upload temp dir and everything in it (not recursive — flat by design). */
+function upload_tmp_rm(string $dir): void
+{
+    if (!is_dir($dir)) {
+        return;
+    }
+    foreach (scandir($dir) as $f) {
+        if ($f === '.' || $f === '..') { continue; }
+        @unlink($dir . '/' . $f);
+    }
+    @rmdir($dir);
+}
+
+/** Discard chunk-upload temp dirs abandoned (closed tab, crash) more than a day ago. */
+function upload_sweep_stale(): void
+{
+    $base = upload_tmp_dir();
+    if (!is_dir($base)) {
+        return;
+    }
+    foreach (scandir($base) as $id) {
+        if ($id === '.' || $id === '..') { continue; }
+        $meta = json_decode((string) @file_get_contents($base . '/' . $id . '/meta.json'), true);
+        if (!$meta || ($meta['created_at'] ?? 0) < now() - 86400) {
+            upload_tmp_rm($base . '/' . $id);
+        }
+    }
+}
+
 /** Try to read a video's duration via ffprobe, if present on the host. */
 function probe_duration(string $file): ?float
 {
@@ -261,7 +371,7 @@ function build_manifest(array $screen): array
     $pdo = db();
 
     $schedules = $pdo->prepare(
-        'SELECT playlist_id, dow_mask, start_time, end_time, date_start, date_end, priority
+        'SELECT playlist_id, dow_mask, start_time, end_time, date_start, date_end, priority, rotation_seconds
            FROM schedules WHERE screen_id = ? ORDER BY priority DESC, id ASC'
     );
     $schedules->execute([$screen['id']]);
@@ -334,6 +444,7 @@ function build_manifest(array $screen): array
             'from'     => $s['date_start'],
             'until'    => $s['date_end'],
             'priority' => (int) $s['priority'],
+            'rotation' => $s['rotation_seconds'] !== null ? (float) $s['rotation_seconds'] : null,
         ], $schedules),
         'playlists'        => $playlists ?: new stdClass(),
     ];
@@ -352,23 +463,83 @@ function resolve_active_playlist(array $manifest, ?int $ts = null): ?int
     $t   = date('H:i', $ts);
     $d   = date('Y-m-d', $ts);
     $yDow = ($dow + 6) % 7;
-    $best = null;
+    $active = [];
 
     foreach ($manifest['schedules'] as $s) {
         if ($s['from'] !== null && $d < $s['from']) continue;
         if ($s['until'] !== null && $d > $s['until']) continue;
-        $active = false;
+        $hit = false;
         if ($s['start'] <= $s['end']) {             // same-day window
-            $active = ($s['dow'] >> $dow & 1) && $t >= $s['start'] && $t < $s['end'];
+            $hit = ($s['dow'] >> $dow & 1) && $t >= $s['start'] && $t < $s['end'];
         } else {                                    // overnight window
-            $active = (($s['dow'] >> $dow & 1) && $t >= $s['start'])
-                   || (($s['dow'] >> $yDow & 1) && $t < $s['end']);
+            $hit = (($s['dow'] >> $dow & 1) && $t >= $s['start'])
+                || (($s['dow'] >> $yDow & 1) && $t < $s['end']);
         }
-        if ($active && ($best === null || $s['priority'] > $best['priority'])) {
-            $best = $s;
+        if ($hit) { $active[] = $s; }
+    }
+    if (!$active) {
+        return $manifest['fallback_playlist'];
+    }
+    // Highest priority wins; if several schedules are tied (same day/time/priority),
+    // rotate between them by wall-clock time — see rotate_tied() docblock.
+    $top  = max(array_column($active, 'priority'));
+    $tied = array_values(array_filter($active, static fn ($s) => $s['priority'] === $top));
+    return (count($tied) === 1 ? $tied[0] : rotate_tied($tied, $ts))['playlist'];
+}
+
+/**
+ * Deterministic round-robin over schedules tied on day/time/priority: each gets
+ * `rotation` seconds (default ROTATION_DEFAULT_SECONDS) in the array's order —
+ * mirrored in JS as activePlaylistId()'s rotation branch, keep both in sync.
+ */
+function rotate_tied(array $tied, int $ts): array
+{
+    $durations = array_map(static fn ($s) => $s['rotation'] ?? ROTATION_DEFAULT_SECONDS, $tied);
+    $total = array_sum($durations);
+    if ($total <= 0) {
+        return $tied[0];
+    }
+    $cursor = fmod((float) $ts, $total);
+    $acc = 0.0;
+    foreach ($tied as $i => $s) {
+        $acc += $durations[$i];
+        if ($cursor < $acc) {
+            return $s;
         }
     }
-    return $best['playlist'] ?? $manifest['fallback_playlist'];
+    return $tied[array_key_last($tied)];
+}
+
+/**
+ * Whether a screen's panel should be powered on right now, per its power_schedules
+ * rows (same dow_mask/overnight-window shape as content `schedules`, minus priority —
+ * any matching window is enough). Returns null when the screen has no power schedule
+ * at all, meaning it isn't power-managed (e.g. an always-on browser kiosk) — callers
+ * should leave those screens' online/offline status untouched.
+ */
+function power_should_be_on(int $screenId, ?int $ts = null): ?bool
+{
+    $rows = db()->prepare('SELECT dow_mask, start_time, end_time FROM power_schedules WHERE screen_id=?');
+    $rows->execute([$screenId]);
+    $rows = $rows->fetchAll();
+    if (!$rows) {
+        return null;
+    }
+    $ts   = $ts ?? now();
+    $dow  = ((int) date('N', $ts)) - 1;  // 0 = Monday
+    $t    = date('H:i', $ts);
+    $yDow = ($dow + 6) % 7;
+
+    foreach ($rows as $r) {
+        $mask = (int) $r['dow_mask'];
+        if ($r['start_time'] <= $r['end_time']) {  // same-day window
+            if (($mask >> $dow & 1) && $t >= $r['start_time'] && $t < $r['end_time']) { return true; }
+        } else {                                    // overnight window
+            if ((($mask >> $dow & 1) && $t >= $r['start_time'])
+                || (($mask >> $yDow & 1) && $t < $r['end_time'])) { return true; }
+        }
+    }
+    return false;
 }
 
 function screen_by_token(string $token): ?array
@@ -379,4 +550,31 @@ function screen_by_token(string $token): ?array
     $stmt = db()->prepare('SELECT * FROM screens WHERE token = ?');
     $stmt->execute([$token]);
     return $stmt->fetch() ?: null;
+}
+
+/** Queue (or overwrite) the single pending remote command for a screen. */
+function screen_command_issue(int $screenId, string $command): void
+{
+    db()->prepare('UPDATE screens SET pending_command=?, pending_command_at=? WHERE id=?')
+        ->execute([$command, now(), $screenId]);
+}
+
+/**
+ * Atomically fetch-and-clear the pending command for a screen — at-most-once
+ * delivery. The command is forgotten the instant it's read, before the companion
+ * agent has executed it, so a device that loses power mid-command silently drops
+ * it rather than replaying it (and rebooting again) on its next boot.
+ */
+function screen_command_fetch_and_clear(int $screenId): ?array
+{
+    $pdo = db();
+    $stmt = $pdo->prepare('SELECT pending_command, pending_command_at FROM screens WHERE id=?');
+    $stmt->execute([$screenId]);
+    $row = $stmt->fetch();
+    if (!$row || $row['pending_command'] === null) {
+        return null;
+    }
+    $pdo->prepare('UPDATE screens SET pending_command=NULL, pending_command_at=NULL WHERE id=?')
+        ->execute([$screenId]);
+    return ['command' => $row['pending_command'], 'issued_at' => (int) $row['pending_command_at']];
 }

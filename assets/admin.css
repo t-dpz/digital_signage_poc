@@ -63,6 +63,7 @@ tr:last-child td { border-bottom: 0; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
        background: var(--dim); margin-right: 7px; }
 .dot.ok { background: var(--live); box-shadow: 0 0 8px var(--live); animation: pulse 2.4s infinite; }
+.dot.zzz { background: var(--accent); }
 @keyframes pulse { 50% { box-shadow: 0 0 2px var(--live); } }
 
 .tag { font: 11px var(--mono); text-transform: uppercase; padding: 2px 7px; border-radius: 4px;
@@ -103,6 +104,14 @@ button:disabled { opacity: .35; cursor: default; }
 .flash { background: #1e2f24; border: 1px solid #2f5c3e; color: var(--live);
          border-radius: 8px; padding: 10px 14px; margin-bottom: 18px; }
 .error { color: var(--warn); }
+
+.upload-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.upload-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.upload-row .upload-name { flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-row progress { flex: 1; height: 8px; accent-color: var(--accent); }
+.upload-row .hint { flex: 0 0 auto; min-width: 9em; }
+.upload-row.upload-ok .hint { color: var(--live); }
+.upload-row.upload-fail .hint { color: var(--warn); }
 
 .login { max-width: 320px; margin: 14vh auto; text-align: center; }
 .login h1 { font: 700 18px var(--mono); letter-spacing: .3em; }
