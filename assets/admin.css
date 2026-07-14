@@ -51,6 +51,18 @@ details.foldergroup > summary::before {
 details.foldergroup[open] > summary::before { transform: rotate(90deg); }
 details.foldergroup > summary:hover { color: var(--accent); }
 details.foldergroup > .details-body { padding: 0 20px 18px; }
+
+details.subfold summary {
+  cursor: pointer; list-style: none; user-select: none;
+  font-size: 14px; margin: 22px 0 10px; color: var(--dim);
+  display: flex; align-items: center; gap: 6px;
+}
+details.subfold summary::-webkit-details-marker { display: none; }
+details.subfold summary::before { content: '▸'; font-size: 11px; transition: transform .15s; }
+details.subfold[open] summary::before { transform: rotate(90deg); }
+details.subfold summary:hover { color: var(--accent); }
+details.subfold[open] summary { color: var(--ink); }
+
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
 

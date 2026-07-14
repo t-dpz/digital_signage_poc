@@ -624,102 +624,6 @@ if ($page === 'screen') {
 
     <?php if ($s):
         $url = 'player.php?token=' . $s['token']; ?>
-    <section class="card">
-      <h2>Player</h2>
-      <p>Point the monitor's kiosk browser at:</p>
-      <p><code class="copy big" data-copy="<?= e($url) ?>"><?= e($url) ?></code> <span class="hint">click to copy the full URL</span></p>
-      <p class="muted">Last heartbeat: <?= $s['last_seen'] ? date('d M Y H:i:s', (int) $s['last_seen']) : 'never' ?>
-        <?php if ($s['player_info']): ?> · <?= e(mb_strimwidth($s['player_info'], 0, 120, '…')) ?><?php endif ?></p>
-      <div class="row">
-        <form method="post" onsubmit="return confirm('Generate a new URL? The kiosk must be repointed.')">
-          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_token">
-          <input type="hidden" name="id" value="<?= $s['id'] ?>">
-          <button class="ghost">Regenerate URL</button>
-        </form>
-        <form method="post" onsubmit="return confirm('Delete this screen and its schedules?')">
-          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_delete">
-          <input type="hidden" name="id" value="<?= $s['id'] ?>">
-          <button class="danger">Delete screen</button>
-        </form>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>Kiosk control</h2>
-      <?php if ($s['pending_command']): ?>
-        <p class="hint"><?= e($s['pending_command'] === 'reboot' ? 'Reboot' : 'Kiosk restart') ?>
-          queued at <?= date('d M Y H:i:s', (int) $s['pending_command_at']) ?> — waiting for the device to check in.</p>
-      <?php endif ?>
-      <p class="muted">Requires the companion agent running on the device (see
-        <code>agent/README.md</code>). Not supported on Tizen SoC displays.</p>
-      <div class="row">
-        <form method="post" onsubmit="return confirm('Restart the kiosk browser/process on this device? The screen will go blank briefly.')">
-          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_command">
-          <input type="hidden" name="command" value="restart_kiosk"><input type="hidden" name="id" value="<?= $s['id'] ?>">
-          <button class="ghost">Restart kiosk</button>
-        </form>
-        <form method="post" onsubmit="return confirm('Reboot the physical device? It will be offline until it powers back on.')">
-          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_command">
-          <input type="hidden" name="command" value="reboot"><input type="hidden" name="id" value="<?= $s['id'] ?>">
-          <button class="danger">Reboot device</button>
-        </form>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>Panel power</h2>
-      <?php
-      $pwrOn = power_should_be_on((int) $s['id']);
-      $pwrSch = $pdo->prepare('SELECT * FROM power_schedules WHERE screen_id=? ORDER BY start_time');
-      $pwrSch->execute([$s['id']]);
-      $pwrSch = $pwrSch->fetchAll(); ?>
-      <p class="muted">
-        <?php if (!$pwrSch): ?>
-          No power windows set — the panel is never told to switch off.
-        <?php else: ?>
-          Should currently be <strong><?= $pwrOn ? 'ON' : 'OFF' ?></strong> per the windows below.
-        <?php endif ?>
-        <?php if ($s['power_driver'] === ''): ?>
-          <span class="hint">Power control is set to "Not managed" above — nothing will actually send on/off commands yet.</span>
-        <?php endif ?>
-      </p>
-      <?php if ($pwrSch): ?>
-      <table>
-        <tr><th>Days</th><th>On from</th><th>Off at</th><th></th></tr>
-        <?php foreach ($pwrSch as $r): ?>
-        <tr>
-          <td><?= dow_label((int) $r['dow_mask']) ?></td>
-          <td><?= e($r['start_time']) ?></td>
-          <td><?= e($r['end_time']) ?><?= $r['start_time'] > $r['end_time'] ? ' <span class="hint">(overnight)</span>' : '' ?></td>
-          <td>
-            <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>">
-              <input type="hidden" name="action" value="power_schedule_delete">
-              <input type="hidden" name="id" value="<?= $r['id'] ?>">
-              <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
-              <button class="danger sm">remove</button></form>
-          </td>
-        </tr>
-        <?php endforeach ?>
-      </table>
-      <?php endif ?>
-
-      <h3>Add power window</h3>
-      <form method="post" class="grid">
-        <input type="hidden" name="csrf" value="<?= $csrf ?>">
-        <input type="hidden" name="action" value="power_schedule_add">
-        <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
-        <label>On from <input type="time" name="start_time" value="08:00" required></label>
-        <label>Off at <span class="hint">earlier than "On from" = overnight</span>
-          <input type="time" name="end_time" value="18:00" required></label>
-        <fieldset class="wide"><legend>Days</legend>
-          <?php foreach (['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as $i => $d): ?>
-            <label class="inline"><input type="checkbox" name="dow[]" value="<?= $i ?>" checked> <?= $d ?></label>
-          <?php endforeach ?>
-        </fieldset>
-        <button>Add power window</button>
-      </form>
-    </section>
-
     <section class="card" id="schedules">
       <h2>Schedules</h2>
       <?php
@@ -804,42 +708,140 @@ if ($page === 'screen') {
       </table>
       <?php else: ?><p class="empty">No schedules — the fallback playlist (if set) plays 24/7.</p><?php endif ?>
 
-      <h3>Add schedule</h3>
-      <?php if (!$allPlaylists): ?>
+      <details class="subfold">
+        <summary>Add schedule</summary>
+        <?php if (!$allPlaylists): ?>
         <p class="empty">Create a playlist first.</p>
-      <?php else: ?>
+        <?php else: ?>
+        <form method="post" class="grid">
+          <input type="hidden" name="csrf" value="<?= $csrf ?>">
+          <input type="hidden" name="action" value="schedule_add">
+          <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
+          <label>Playlist
+            <select name="playlist_id"><?php foreach ($allPlaylists as $p): ?>
+              <option value="<?= $p['id'] ?>"><?= e($p['name']) ?></option><?php endforeach ?>
+            </select>
+          </label>
+          <fieldset class="wide"><legend>Time windows <span class="hint">OR'd — e.g. 08:00–09:00 and 14:00–15:00; leave a pair blank to skip it</span></legend>
+            <?php for ($w = 0; $w < MAX_SCHEDULE_WINDOWS; $w++): ?>
+              <span class="window-pair">
+                <input type="time" name="win_start[]" value="<?= $w === 0 ? '09:00' : '' ?>" <?= $w === 0 ? 'required' : '' ?>>
+                <span class="hint">–</span>
+                <input type="time" name="win_end[]" value="<?= $w === 0 ? '18:00' : '' ?>">
+              </span>
+            <?php endfor ?>
+          </fieldset>
+          <label>Priority <span class="hint">higher wins on overlap</span>
+            <input type="number" name="priority" value="0" style="width:5em"></label>
+          <label>Rotation (s) <span class="hint">only used if tied with another schedule; min/blank = <?= round(ROTATION_DEFAULT_SECONDS) ?>s</span>
+            <input type="number" step="1" min="<?= round(ROTATION_DEFAULT_SECONDS) ?>" name="rotation_seconds" placeholder="<?= round(ROTATION_DEFAULT_SECONDS) ?>" style="width:6em"></label>
+          <fieldset class="wide"><legend>Days</legend>
+            <?php foreach (['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as $i => $d): ?>
+              <label class="inline"><input type="checkbox" name="dow[]" value="<?= $i ?>" checked> <?= $d ?></label>
+            <?php endforeach ?>
+          </fieldset>
+          <label>Start date <span class="hint">optional</span> <input type="date" name="date_start"></label>
+          <label>End date <span class="hint">optional, inclusive</span> <input type="date" name="date_end"></label>
+          <button>Add schedule</button>
+        </form>
+        <?php endif ?>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>Panel power</h2>
+      <?php
+      $pwrOn = power_should_be_on((int) $s['id']);
+      $pwrSch = $pdo->prepare('SELECT * FROM power_schedules WHERE screen_id=? ORDER BY start_time');
+      $pwrSch->execute([$s['id']]);
+      $pwrSch = $pwrSch->fetchAll(); ?>
+      <p class="muted">
+        <?php if (!$pwrSch): ?>
+          No power windows set — the panel is never told to switch off.
+        <?php else: ?>
+          Should currently be <strong><?= $pwrOn ? 'ON' : 'OFF' ?></strong> per the windows below.
+        <?php endif ?>
+        <?php if ($s['power_driver'] === ''): ?>
+          <span class="hint">Power control is set to "Not managed" above — nothing will actually send on/off commands yet.</span>
+        <?php endif ?>
+      </p>
+      <?php if ($pwrSch): ?>
+      <table>
+        <tr><th>Days</th><th>On from</th><th>Off at</th><th></th></tr>
+        <?php foreach ($pwrSch as $r): ?>
+        <tr>
+          <td><?= dow_label((int) $r['dow_mask']) ?></td>
+          <td><?= e($r['start_time']) ?></td>
+          <td><?= e($r['end_time']) ?><?= $r['start_time'] > $r['end_time'] ? ' <span class="hint">(overnight)</span>' : '' ?></td>
+          <td>
+            <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>">
+              <input type="hidden" name="action" value="power_schedule_delete">
+              <input type="hidden" name="id" value="<?= $r['id'] ?>">
+              <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
+              <button class="danger sm">remove</button></form>
+          </td>
+        </tr>
+        <?php endforeach ?>
+      </table>
+      <?php endif ?>
+
+      <h3>Add power window</h3>
       <form method="post" class="grid">
         <input type="hidden" name="csrf" value="<?= $csrf ?>">
-        <input type="hidden" name="action" value="schedule_add">
+        <input type="hidden" name="action" value="power_schedule_add">
         <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
-        <label>Playlist
-          <select name="playlist_id"><?php foreach ($allPlaylists as $p): ?>
-            <option value="<?= $p['id'] ?>"><?= e($p['name']) ?></option><?php endforeach ?>
-          </select>
-        </label>
-        <fieldset class="wide"><legend>Time windows <span class="hint">OR'd — e.g. 08:00–09:00 and 14:00–15:00; leave a pair blank to skip it</span></legend>
-          <?php for ($w = 0; $w < MAX_SCHEDULE_WINDOWS; $w++): ?>
-            <span class="window-pair">
-              <input type="time" name="win_start[]" value="<?= $w === 0 ? '09:00' : '' ?>" <?= $w === 0 ? 'required' : '' ?>>
-              <span class="hint">–</span>
-              <input type="time" name="win_end[]" value="<?= $w === 0 ? '18:00' : '' ?>">
-            </span>
-          <?php endfor ?>
-        </fieldset>
-        <label>Priority <span class="hint">higher wins on overlap</span>
-          <input type="number" name="priority" value="0" style="width:5em"></label>
-        <label>Rotation (s) <span class="hint">only used if tied with another schedule; min/blank = <?= round(ROTATION_DEFAULT_SECONDS) ?>s</span>
-          <input type="number" step="1" min="<?= round(ROTATION_DEFAULT_SECONDS) ?>" name="rotation_seconds" placeholder="<?= round(ROTATION_DEFAULT_SECONDS) ?>" style="width:6em"></label>
+        <label>On from <input type="time" name="start_time" value="08:00" required></label>
+        <label>Off at <span class="hint">earlier than "On from" = overnight</span>
+          <input type="time" name="end_time" value="18:00" required></label>
         <fieldset class="wide"><legend>Days</legend>
           <?php foreach (['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as $i => $d): ?>
             <label class="inline"><input type="checkbox" name="dow[]" value="<?= $i ?>" checked> <?= $d ?></label>
           <?php endforeach ?>
         </fieldset>
-        <label>Start date <span class="hint">optional</span> <input type="date" name="date_start"></label>
-        <label>End date <span class="hint">optional, inclusive</span> <input type="date" name="date_end"></label>
-        <button>Add schedule</button>
+        <button>Add power window</button>
       </form>
+    </section>
+
+    <section class="card">
+      <h2>Player</h2>
+      <p>Point the monitor's kiosk browser at:</p>
+      <p><code class="copy big" data-copy="<?= e($url) ?>"><?= e($url) ?></code> <span class="hint">click to copy the full URL</span></p>
+      <p class="muted">Last heartbeat: <?= $s['last_seen'] ? date('d M Y H:i:s', (int) $s['last_seen']) : 'never' ?>
+        <?php if ($s['player_info']): ?> · <?= e(mb_strimwidth($s['player_info'], 0, 120, '…')) ?><?php endif ?></p>
+      <div class="row">
+        <form method="post" onsubmit="return confirm('Generate a new URL? The kiosk must be repointed.')">
+          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_token">
+          <input type="hidden" name="id" value="<?= $s['id'] ?>">
+          <button class="ghost">Regenerate URL</button>
+        </form>
+        <form method="post" onsubmit="return confirm('Delete this screen and its schedules?')">
+          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_delete">
+          <input type="hidden" name="id" value="<?= $s['id'] ?>">
+          <button class="danger">Delete screen</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Kiosk control</h2>
+      <?php if ($s['pending_command']): ?>
+        <p class="hint"><?= e($s['pending_command'] === 'reboot' ? 'Reboot' : 'Kiosk restart') ?>
+          queued at <?= date('d M Y H:i:s', (int) $s['pending_command_at']) ?> — waiting for the device to check in.</p>
       <?php endif ?>
+      <p class="muted">Requires the companion agent running on the device (see
+        <code>agent/README.md</code>). Not supported on Tizen SoC displays.</p>
+      <div class="row">
+        <form method="post" onsubmit="return confirm('Restart the kiosk browser/process on this device? The screen will go blank briefly.')">
+          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_command">
+          <input type="hidden" name="command" value="restart_kiosk"><input type="hidden" name="id" value="<?= $s['id'] ?>">
+          <button class="ghost">Restart kiosk</button>
+        </form>
+        <form method="post" onsubmit="return confirm('Reboot the physical device? It will be offline until it powers back on.')">
+          <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="screen_command">
+          <input type="hidden" name="command" value="reboot"><input type="hidden" name="id" value="<?= $s['id'] ?>">
+          <button class="danger">Reboot device</button>
+        </form>
+      </div>
     </section>
     <?php endif;
     layout_bottom(); exit;
