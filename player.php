@@ -305,10 +305,18 @@ async function showImage(item, layer, show) {
   state.advanceTimer = setTimeout(advance, (item.duration || 15) * 1000);
 }
 
+function embeddableUrl(url) {
+  const m = url.match(/(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  if (!m) return url;
+  const id = m[1];
+  return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&mute=1&controls=0&modestbranding=1&playsinline=1&rel=0&loop=1&playlist=${id}`;
+}
+
 function showUrl(item, layer, show) {
   const f = document.createElement('iframe');
-  f.src = item.url;
-  f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+  f.src = embeddableUrl(item.url);
+  f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+  f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-presentation');
   layer.appendChild(f);
   // load and the 6s fallback race each other — guard so show() (which mutates
   // state.front) never fires twice, or the second call blanks the active layer.
