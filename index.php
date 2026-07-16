@@ -34,14 +34,11 @@ if ($page === 'login') {
     }
     layout_top('Sign in', false); ?>
     <div class="login">
-      <h1>Signage</h1>
+      <h1>Signage 404</h1>
       <form method="post">
         <?php if ($err): ?><p class="error"><?= e($err) ?></p><?php endif ?>
         <input type="password" name="password" placeholder="Admin password" autofocus required>
         <button>Sign in</button>
-        <?php if (cfg('admin_password') === 'change-me'): ?>
-          <p class="hint">Default password is <code>change-me</code> — set your own in <code>config.php</code>.</p>
-        <?php endif ?>
       </form>
     </div>
     <?php layout_bottom(); exit;
@@ -506,7 +503,7 @@ function layout_top(string $title, bool $nav = true): void
 <body>
 <?php if ($nav): ?>
 <header>
-  <span class="brand">SIGNAGE<em>/on-prem</em></span>
+  <span class="brand">SIGNAGE<em>/404</em></span>
   <nav>
     <a href="index.php" class="<?= ($_GET['page'] ?? 'screens') === 'screens' || ($_GET['page'] ?? '') === 'screen' ? 'on' : '' ?>">Screens</a>
     <a href="index.php?page=playlists" class="<?= in_array($_GET['page'] ?? '', ['playlists', 'playlist']) ? 'on' : '' ?>">Playlists</a>
