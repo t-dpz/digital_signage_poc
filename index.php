@@ -720,7 +720,7 @@ if ($page === 'screen') {
               </fieldset>
               <label>Start date <span class="hint">optional</span> <input type="date" name="date_start" value="<?= e($r['date_start'] ?? '') ?>"></label>
               <label>End date <span class="hint">optional, inclusive</span> <input type="date" name="date_end" value="<?= e($r['date_end'] ?? '') ?>"></label>
-              <div class="row">
+              <div class="row wide">
                 <button>Save</button>
                 <a class="btn ghost" href="index.php?page=screen&id=<?= $s['id'] ?>#schedules">Cancel</a>
               </div>
