@@ -76,6 +76,7 @@ tr:last-child td { border-bottom: 0; }
        background: var(--dim); margin-right: 7px; }
 .dot.ok { background: var(--live); box-shadow: 0 0 8px var(--live); animation: pulse 2.4s infinite; }
 .dot.zzz { background: var(--accent); }
+.dot.warn { background: var(--warn); }
 @keyframes pulse { 50% { box-shadow: 0 0 2px var(--live); } }
 
 .tag { font: 11px var(--mono); text-transform: uppercase; padding: 2px 7px; border-radius: 4px;

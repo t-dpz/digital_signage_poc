@@ -675,10 +675,10 @@ if ($page === 'screen') {
       // screen. Refreshed client-side by schedule_status.php — see script below.
       $schedStatus = schedule_group_statuses($s);
       $schedStatusHtml = [
-          'active'         => '<span class="dot ok"></span><span class="hint">active now</span>',
-          'lower_priority' => '<span class="dot zzz"></span><span class="hint">in window &middot; lower priority</span>',
-          'waiting_turn'   => '<span class="dot zzz"></span><span class="hint">in window &middot; waiting turn</span>',
-          'inactive'       => '<span class="muted">&mdash;</span>',
+          'active'         => '<span class="dot ok" title="Active now — this rule is driving playback"></span>',
+          'lower_priority' => '<span class="dot zzz" title="In window, but overridden by a higher-priority rule"></span>',
+          'waiting_turn'   => '<span class="dot zzz" title="In window, tied for top priority — waiting its turn in the rotation"></span>',
+          'inactive'       => '<span class="dot warn" title="Not active right now — outside its scheduled window"></span>',
       ];
       if ($schGroups): ?>
       <table id="sched-table">
@@ -798,10 +798,10 @@ if ($page === 'screen') {
         const table = document.getElementById('sched-table');
         if (!table) return;
         const STATUS_HTML = {
-          active:         '<span class="dot ok"></span><span class="hint">active now</span>',
-          lower_priority: '<span class="dot zzz"></span><span class="hint">in window &middot; lower priority</span>',
-          waiting_turn:   '<span class="dot zzz"></span><span class="hint">in window &middot; waiting turn</span>',
-          inactive:       '<span class="muted">&mdash;</span>',
+          active:         '<span class="dot ok" title="Active now — this rule is driving playback"></span>',
+          lower_priority: '<span class="dot zzz" title="In window, but overridden by a higher-priority rule"></span>',
+          waiting_turn:   '<span class="dot zzz" title="In window, tied for top priority — waiting its turn in the rotation"></span>',
+          inactive:       '<span class="dot warn" title="Not active right now — outside its scheduled window"></span>',
         };
         async function refresh() {
           try {
