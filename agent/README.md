@@ -34,6 +34,14 @@ failure mode; a loop is not.
 
 ## Install
 
+**Fast path:** `curl -O http://<server>/agent/setup-signage-pi.sh && sudo bash setup-signage-pi.sh` —
+prompts for the server URL and screen token, installs cage + chromium, the
+agent, its sudoers grant, and a `kiosk.service` unit, all in one go. Safe to
+re-run any time the server or token changes (re-run with no args and it
+pre-fills the current values — just press enter to keep one and retype the
+other). See its own comments for what it does; the steps below are what it
+automates, kept here for anyone provisioning by hand or auditing what it does.
+
 1. Copy `signage-agent.sh` to `/opt/signage-agent/signage-agent.sh` on the
    device and `chmod +x` it.
 2. Create a dedicated low-privileged user: `useradd --system --no-create-home signage-agent`.
