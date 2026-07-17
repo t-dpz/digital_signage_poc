@@ -429,6 +429,14 @@ if ($action !== null) {
         touch_playlist($pid);
         redirect('index.php?page=playlist&id=' . $pid);
 
+    case 'item_set_muted':
+        $pid = (int) $_POST['playlist_id'];
+        $muted = ($_POST['muted'] ?? '') === '1' ? 1 : 0;
+        $pdo->prepare('UPDATE playlist_items SET muted=? WHERE id=? AND playlist_id=?')
+            ->execute([$muted, (int) $_POST['id'], $pid]);
+        touch_playlist($pid);
+        redirect('index.php?page=playlist&id=' . $pid);
+
     case 'item_delete':
         $pdo->prepare('DELETE FROM playlist_items WHERE id=?')->execute([(int) $_POST['id']]);
         touch_playlist((int) $_POST['playlist_id']);
@@ -933,7 +941,19 @@ if ($page === 'playlist') {
             </form>
             <?php if ($it['type'] === 'video' && $it['nat']): ?><span class="hint"><?= round((float) $it['nat']) ?> s natural</span><?php endif ?>
           </td>
-          <td><?= $it['type'] === 'video' ? ($it['muted'] ? 'muted' : '🔊 on') : '—' ?></td>
+          <td>
+            <?php if ($it['type'] === 'video'): ?>
+            <form method="post" class="row">
+              <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="item_set_muted">
+              <input type="hidden" name="id" value="<?= $it['id'] ?>"><input type="hidden" name="playlist_id" value="<?= $pl['id'] ?>">
+              <?php if ($it['muted']): ?>
+              <button class="ghost sm" name="muted" value="0" title="Muted — click to unmute">🔇</button>
+              <?php else: ?>
+              <button class="ghost sm" name="muted" value="1" title="Sound on — click to mute">🔊</button>
+              <?php endif ?>
+            </form>
+            <?php else: ?>—<?php endif ?>
+          </td>
           <td class="row">
             <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="item_move">
               <input type="hidden" name="id" value="<?= $it['id'] ?>"><input type="hidden" name="playlist_id" value="<?= $pl['id'] ?>">
