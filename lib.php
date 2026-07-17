@@ -50,6 +50,9 @@ function db(): PDO
     if (!is_dir(storage_path('media'))) {
         mkdir(storage_path('media'), 0775, true);
     }
+    if (!is_dir(storage_path('screenshots'))) {
+        mkdir(storage_path('screenshots'), 0775, true);
+    }
     $fresh = !file_exists(storage_path('signage.sqlite'));
     $pdo = new PDO('sqlite:' . storage_path('signage.sqlite'), null, null, [
         PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
@@ -78,6 +81,7 @@ CREATE TABLE screens (
     player_info          TEXT NOT NULL DEFAULT '',
     pending_command      TEXT,     -- 'restart_kiosk' | 'reboot' | NULL
     pending_command_at   INTEGER,  -- unix ts when issued, NULL when none
+    screenshot_at        INTEGER,  -- unix ts of last player-submitted screenshot, NULL if none yet
     power_driver         TEXT NOT NULL DEFAULT '',  -- key into POWER_DRIVERS; '' = unmanaged
     power_host           TEXT NOT NULL DEFAULT '',  -- IP/hostname for the LAN control protocol
     power_port           INTEGER,                   -- TCP port, driver-specific default if NULL
@@ -214,6 +218,13 @@ SQL);
         $pdo->exec("ALTER TABLE screens ADD COLUMN power_host TEXT NOT NULL DEFAULT ''");
         $pdo->exec('ALTER TABLE screens ADD COLUMN power_port INTEGER');
         $pdo->exec("ALTER TABLE screens ADD COLUMN power_mac TEXT NOT NULL DEFAULT ''");
+    }
+    $hasScreenshotAt = false;
+    foreach ($pdo->query('PRAGMA table_info(screens)') as $col) {
+        if ($col['name'] === 'screenshot_at') { $hasScreenshotAt = true; break; }
+    }
+    if (!$hasScreenshotAt) {
+        $pdo->exec('ALTER TABLE screens ADD COLUMN screenshot_at INTEGER');
     }
     $hasPowerSchedules = $pdo->query(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='power_schedules'"
@@ -473,6 +484,29 @@ function build_manifest(array $screen): array
     return $manifest;
 }
 
+/**
+ * Does one raw `schedules` row's day/time/date window match at $ts? Used by the
+ * admin screen-detail page to flag which schedule rule is active right now.
+ * Same semantics as the per-schedule hit test inside resolve_active_playlist(),
+ * just addressed by DB column names instead of the manifest's shorthand keys.
+ */
+function schedule_window_hit(array $row, int $ts): bool
+{
+    $dow  = ((int) date('N', $ts)) - 1;              // 0 = Monday
+    $t    = date('H:i', $ts);
+    $d    = date('Y-m-d', $ts);
+    $yDow = ($dow + 6) % 7;
+    if ($row['date_start'] !== null && $row['date_start'] !== '' && $d < $row['date_start']) return false;
+    if ($row['date_end']   !== null && $row['date_end']   !== '' && $d > $row['date_end'])   return false;
+    $mask = (int) $row['dow_mask'];
+    if ($row['start_time'] <= $row['end_time']) {   // same-day window
+        return (bool) (($mask >> $dow & 1) && $t >= $row['start_time'] && $t < $row['end_time']);
+    }
+    // overnight window
+    return (bool) ((($mask >> $dow & 1) && $t >= $row['start_time'])
+                 || (($mask >> $yDow & 1) && $t < $row['end_time']));
+}
+
 /** Server-side resolver (used for the admin "now playing" column). */
 function resolve_active_playlist(array $manifest, ?int $ts = null): ?int
 {
@@ -526,6 +560,54 @@ function rotate_tied(array $tied, int $ts): array
         }
     }
     return $tied[array_key_last($tied)];
+}
+
+/**
+ * Per-schedule-rule status for the admin screen-detail page, keyed by group_id:
+ *   'active'         — this rule is what's actually driving playback right now.
+ *   'lower_priority' — in its time window, but overridden by a higher-priority rule.
+ *   'waiting_turn'   — in its time window, tied for top priority, losing the
+ *                      rotation cycle to another rule right now.
+ *   'inactive'       — outside its time window entirely right now.
+ * Shared by the initial page render and the schedule_status.php poll endpoint so
+ * they can never drift apart.
+ */
+function schedule_group_statuses(array $screen, ?int $ts = null): array
+{
+    $ts = $ts ?? now();
+    $sch = db()->prepare('SELECT * FROM schedules WHERE screen_id=? ORDER BY priority DESC, start_time');
+    $sch->execute([$screen['id']]);
+    $groups = [];
+    foreach ($sch->fetchAll() as $r) { $groups[$r['group_id']][] = $r; }
+
+    $activePid = resolve_active_playlist(build_manifest($screen), $ts);
+
+    $inWindow = [];
+    $topPriority = null;
+    foreach ($groups as $gid => $rows) {
+        $hit = false;
+        foreach ($rows as $w) { if (schedule_window_hit($w, $ts)) { $hit = true; break; } }
+        $inWindow[$gid] = $hit;
+        if ($hit) {
+            $p = (int) $rows[0]['priority'];
+            if ($topPriority === null || $p > $topPriority) { $topPriority = $p; }
+        }
+    }
+
+    $out = [];
+    foreach ($groups as $gid => $rows) {
+        $r = $rows[0];
+        $hit = $inWindow[$gid];
+        $active = $hit && (int) $r['playlist_id'] === (int) $activePid;
+        if ($active) {
+            $out[$gid] = 'active';
+        } elseif ($hit) {
+            $out[$gid] = (int) $r['priority'] < $topPriority ? 'lower_priority' : 'waiting_turn';
+        } else {
+            $out[$gid] = 'inactive';
+        }
+    }
+    return $out;
 }
 
 /**

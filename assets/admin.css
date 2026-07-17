@@ -126,6 +126,11 @@ button:disabled { opacity: .35; cursor: default; }
 .upload-row.upload-ok .hint { color: var(--live); }
 .upload-row.upload-fail .hint { color: var(--warn); }
 
+.screenshot-wrap { margin-bottom: 16px; }
+.screenshot-wrap img { display: block; max-width: 320px; width: 100%; border-radius: 8px;
+                       border: 1px solid var(--line); background: #000; }
+.screenshot-wrap .hint { margin-top: 6px; }
+
 .login { max-width: 320px; margin: 14vh auto; text-align: center; }
 .login h1 { font: 700 18px var(--mono); letter-spacing: .3em; }
 .login form { display: flex; flex-direction: column; gap: 12px; margin-top: 18px; }

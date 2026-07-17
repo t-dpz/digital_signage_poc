@@ -341,6 +341,33 @@ function heartbeat() {
     .then(() => { state.online = true; })
     .catch(() => { state.online = false; })
     .finally(updateStatus);
+  captureScreenshot();
+}
+
+/**
+ * Draws whatever's on the front layer to a small canvas and ships it to the
+ * admin panel's thumbnail. Only video/img elements are same-origin (blob:
+ * URLs or media.php) and thus readable by canvas; web-page (iframe) items
+ * are silently skipped, leaving the last known screenshot in place.
+ */
+function captureScreenshot() {
+  const layer = state.layers[state.front];
+  const el = layer && layer.querySelector('video, img');
+  if (!el) return;
+  const srcW = el.videoWidth || el.naturalWidth || el.clientWidth || 1920;
+  const srcH = el.videoHeight || el.naturalHeight || el.clientHeight || 1080;
+  if (!srcW || !srcH) return;
+  const scale = Math.min(1, 480 / srcW);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(srcW * scale);
+  canvas.height = Math.round(srcH * scale);
+  try {
+    canvas.getContext('2d').drawImage(el, 0, 0, canvas.width, canvas.height);
+  } catch (_) { return; }                             // paranoia: tainted canvas
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    fetch(`api.php?action=screenshot&token=${BOOT.token}`, { method: 'POST', body: blob }).catch(() => {});
+  }, 'image/jpeg', 0.6);
 }
 
 function updateStatus() {

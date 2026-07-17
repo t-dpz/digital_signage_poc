@@ -597,6 +597,36 @@ if ($page === 'screen') {
 
     <section class="card">
       <h2>Details</h2>
+      <?php if ($s): ?>
+      <div class="screenshot-wrap">
+        <img id="screenshot" alt="Live screenshot" style="display:none">
+        <p class="hint" id="screenshot-meta">loading screenshot…</p>
+      </div>
+      <script>
+      (function () {
+        const id = <?= (int) $s['id'] ?>;
+        const img = document.getElementById('screenshot');
+        const meta = document.getElementById('screenshot-meta');
+        let lastUrl = null;
+        async function refresh() {
+          try {
+            const res = await fetch(`screenshot.php?id=${id}&_=${Date.now()}`, { cache: 'no-store' });
+            if (!res.ok) { meta.textContent = 'no screenshot yet'; return; }
+            const at = parseInt(res.headers.get('X-Captured-At') || '0', 10);
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            img.src = url;
+            img.style.display = '';
+            if (lastUrl) URL.revokeObjectURL(lastUrl);
+            lastUrl = url;
+            meta.textContent = at ? 'captured ' + new Date(at * 1000).toLocaleString() : '';
+          } catch (e) { /* leave last known image in place */ }
+        }
+        refresh();
+        setInterval(refresh, 20000);
+      })();
+      </script>
+      <?php endif; ?>
       <form method="post" class="grid">
         <input type="hidden" name="csrf" value="<?= $csrf ?>">
         <input type="hidden" name="action" value="screen_save">
@@ -641,12 +671,22 @@ if ($page === 'screen') {
       $schGroups = [];
       foreach ($sch->fetchAll() as $r) { $schGroups[$r['group_id']][] = $r; }
       $editGroupId = (string) ($_GET['edit_schedule'] ?? '');
+      // Same resolver the player uses, so this can never disagree with what's on
+      // screen. Refreshed client-side by schedule_status.php — see script below.
+      $schedStatus = schedule_group_statuses($s);
+      $schedStatusHtml = [
+          'active'         => '<span class="dot ok"></span><span class="hint">active now</span>',
+          'lower_priority' => '<span class="dot zzz"></span><span class="hint">in window &middot; lower priority</span>',
+          'waiting_turn'   => '<span class="dot zzz"></span><span class="hint">in window &middot; waiting turn</span>',
+          'inactive'       => '<span class="muted">&mdash;</span>',
+      ];
       if ($schGroups): ?>
-      <table>
-        <tr><th>Playlist</th><th>Days</th><th>Time</th><th>Date range</th><th>Priority</th><th>Rotation</th><th></th></tr>
-        <?php foreach ($schGroups as $gid => $rows): $r = $rows[0]; if ($gid === $editGroupId): ?>
+      <table id="sched-table">
+        <tr><th>Active</th><th>Playlist</th><th>Days</th><th>Time</th><th>Date range</th><th>Priority</th><th>Rotation</th><th></th></tr>
+        <?php foreach ($schGroups as $gid => $rows): $r = $rows[0];
+          if ($gid === $editGroupId): ?>
         <tr>
-          <td colspan="7">
+          <td colspan="8">
             <form method="post" class="grid">
               <input type="hidden" name="csrf" value="<?= $csrf ?>">
               <input type="hidden" name="action" value="schedule_update">
@@ -688,7 +728,8 @@ if ($page === 'screen') {
           </td>
         </tr>
         <?php else: ?>
-        <tr>
+        <tr data-gid="<?= e($gid) ?>">
+          <td class="sched-status"><?= $schedStatusHtml[$schedStatus[$gid]] ?></td>
           <td><a href="index.php?page=playlist&id=<?= $r['playlist_id'] ?>"><?= e($r['pname']) ?></a></td>
           <td><?= dow_label((int) $r['dow_mask']) ?></td>
           <td><?= implode(' <span class="hint">OR</span> ', array_map(
@@ -751,6 +792,31 @@ if ($page === 'screen') {
         </form>
         <?php endif ?>
       </details>
+      <script>
+      (function () {
+        const screenId = <?= (int) $s['id'] ?>;
+        const table = document.getElementById('sched-table');
+        if (!table) return;
+        const STATUS_HTML = {
+          active:         '<span class="dot ok"></span><span class="hint">active now</span>',
+          lower_priority: '<span class="dot zzz"></span><span class="hint">in window &middot; lower priority</span>',
+          waiting_turn:   '<span class="dot zzz"></span><span class="hint">in window &middot; waiting turn</span>',
+          inactive:       '<span class="muted">&mdash;</span>',
+        };
+        async function refresh() {
+          try {
+            const res = await fetch(`schedule_status.php?screen_id=${screenId}&_=${Date.now()}`, { cache: 'no-store' });
+            if (!res.ok) return;
+            const statuses = await res.json();
+            for (const [gid, state] of Object.entries(statuses)) {
+              const cell = table.querySelector(`tr[data-gid="${CSS.escape(gid)}"] td.sched-status`);
+              if (cell && STATUS_HTML[state]) cell.innerHTML = STATUS_HTML[state];
+            }
+          } catch (e) { /* leave last known statuses in place */ }
+        }
+        setInterval(refresh, 20000);
+      })();
+      </script>
     </section>
 
     <section class="card">
