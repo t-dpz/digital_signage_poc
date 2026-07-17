@@ -33,6 +33,12 @@ function cfg(string $key): mixed
     return $GLOBALS['cfg'][$key] ?? null;
 }
 
+// Every schedule/heartbeat/created_at display below assumes wall-clock time at the
+// screens' physical location. PHP defaults to UTC with no php.ini date.timezone set,
+// which silently shifts schedule windows (and every admin-facing timestamp) by the
+// local UTC offset — set explicitly rather than depending on server/php.ini config.
+date_default_timezone_set((string) (cfg('timezone') ?: 'UTC'));
+
 function storage_path(string $sub = ''): string
 {
     $base = rtrim(cfg('storage_path'), '/');

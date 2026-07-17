@@ -11,6 +11,10 @@ return [
     // If kept inside the docroot, the bundled .htaccess blocks direct access (Apache).
     'storage_path' => __DIR__ . '/storage',
 
+    // Wall-clock timezone for schedule resolution and every admin-facing timestamp —
+    // set to wherever the screens physically are. PHP otherwise defaults to UTC.
+    'timezone' => 'Europe/Brussels',
+
     // How often players re-fetch their manifest / send a heartbeat (seconds).
     'player_refresh' => 60,
 
