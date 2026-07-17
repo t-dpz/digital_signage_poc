@@ -611,7 +611,16 @@ if ($page === 'screen') {
         async function refresh() {
           try {
             const res = await fetch(`screenshot.php?id=${id}&_=${Date.now()}`, { cache: 'no-store' });
-            if (!res.ok) { meta.textContent = 'no screenshot yet'; return; }
+            const ctype = res.headers.get('Content-Type') || '';
+            if (ctype.includes('application/json')) {
+              const data = await res.json();
+              img.style.display = 'none';
+              meta.textContent = data.title
+                ? `Currently showing "${data.title}" — embedded page, no thumbnail available`
+                : 'Embedded page — no thumbnail available';
+              return;
+            }
+            if (!res.ok) { img.style.display = 'none'; meta.textContent = 'no screenshot yet'; return; }
             const at = parseInt(res.headers.get('X-Captured-At') || '0', 10);
             const blob = await res.blob();
             const url = URL.createObjectURL(blob);
@@ -620,7 +629,7 @@ if ($page === 'screen') {
             if (lastUrl) URL.revokeObjectURL(lastUrl);
             lastUrl = url;
             meta.textContent = at ? 'captured ' + new Date(at * 1000).toLocaleString() : '';
-          } catch (e) { /* leave last known image in place */ }
+          } catch (e) { /* leave last known state in place */ }
         }
         refresh();
         setInterval(refresh, 20000);

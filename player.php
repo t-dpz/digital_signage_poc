@@ -331,11 +331,13 @@ function showUrl(item, layer, show) {
 
 function heartbeat() {
   const items = state.manifest ? currentItems() : [];
+  const cur = state.index >= 0 && items[state.index] ? items[state.index] : null;
   const body = JSON.stringify({
     ua: navigator.userAgent,
     res: `${screen.width}x${screen.height}`,
     playlist: state.playlistId,
-    item: state.index >= 0 && items[state.index] ? items[state.index].title : null,
+    item: cur ? cur.title : null,
+    type: cur ? cur.type : null,
   });
   fetch(`api.php?action=heartbeat&token=${BOOT.token}`, { method: 'POST', body })
     .then(() => { state.online = true; })
