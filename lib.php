@@ -92,6 +92,8 @@ CREATE TABLE screens (
     power_host           TEXT NOT NULL DEFAULT '',  -- IP/hostname for the LAN control protocol
     power_port           INTEGER,                   -- TCP port, driver-specific default if NULL
     power_mac            TEXT NOT NULL DEFAULT '',  -- MAC for Wake-on-LAN
+    takeover_enabled     INTEGER NOT NULL DEFAULT 0, -- master switch for the takeover page
+    takeover_html        TEXT NOT NULL DEFAULT '',   -- sanitized rich-text body (see sanitize_takeover_html())
     updated_at           INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
 );
@@ -150,11 +152,20 @@ CREATE TABLE power_schedules (
     end_time    TEXT NOT NULL DEFAULT '18:00', -- …until here (may be < start_time = overnight)
     created_at  INTEGER NOT NULL
 );
+CREATE TABLE takeover_schedules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    screen_id   INTEGER NOT NULL REFERENCES screens(id) ON DELETE CASCADE,
+    dow_mask    INTEGER NOT NULL DEFAULT 127,  -- bit 0 = Monday … bit 6 = Sunday
+    start_time  TEXT NOT NULL DEFAULT '00:00', -- HH:MM, takeover should be shown from here…
+    end_time    TEXT NOT NULL DEFAULT '24:00', -- …until here (may be < start_time = overnight)
+    created_at  INTEGER NOT NULL
+);
 CREATE INDEX idx_items_playlist ON playlist_items(playlist_id, position);
 CREATE INDEX idx_sched_screen   ON schedules(screen_id);
 CREATE INDEX idx_sched_group    ON schedules(group_id);
 CREATE INDEX idx_content_folder ON content(folder_id);
 CREATE INDEX idx_power_sched_screen ON power_schedules(screen_id);
+CREATE INDEX idx_takeover_sched_screen ON takeover_schedules(screen_id);
 SQL);
 }
 
@@ -247,6 +258,30 @@ CREATE TABLE power_schedules (
 );
 SQL);
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_power_sched_screen ON power_schedules(screen_id)');
+    }
+    $hasTakeover = false;
+    foreach ($pdo->query('PRAGMA table_info(screens)') as $col) {
+        if ($col['name'] === 'takeover_enabled') { $hasTakeover = true; break; }
+    }
+    if (!$hasTakeover) {
+        $pdo->exec('ALTER TABLE screens ADD COLUMN takeover_enabled INTEGER NOT NULL DEFAULT 0');
+        $pdo->exec("ALTER TABLE screens ADD COLUMN takeover_html TEXT NOT NULL DEFAULT ''");
+    }
+    $hasTakeoverSchedules = $pdo->query(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='takeover_schedules'"
+    )->fetchColumn();
+    if (!$hasTakeoverSchedules) {
+        $pdo->exec(<<<'SQL'
+CREATE TABLE takeover_schedules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    screen_id   INTEGER NOT NULL REFERENCES screens(id) ON DELETE CASCADE,
+    dow_mask    INTEGER NOT NULL DEFAULT 127,
+    start_time  TEXT NOT NULL DEFAULT '00:00',
+    end_time    TEXT NOT NULL DEFAULT '24:00',
+    created_at  INTEGER NOT NULL
+);
+SQL);
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_takeover_sched_screen ON takeover_schedules(screen_id)');
     }
 }
 
@@ -464,6 +499,11 @@ function build_manifest(array $screen): array
         }
     }
 
+    $takeoverSched = $pdo->prepare(
+        'SELECT dow_mask, start_time, end_time FROM takeover_schedules WHERE screen_id = ? ORDER BY start_time'
+    );
+    $takeoverSched->execute([$screen['id']]);
+
     $manifest = [
         'version'          => SIGNAGE_VERSION,
         'generated_at'     => now(),
@@ -482,12 +522,70 @@ function build_manifest(array $screen): array
             'rotation' => $s['rotation_seconds'] !== null ? (float) $s['rotation_seconds'] : null,
         ], $schedules),
         'playlists'        => $playlists ?: new stdClass(),
+        'takeover'         => [
+            'enabled'  => (bool) $screen['takeover_enabled'],
+            'html'     => $screen['takeover_html'],
+            'schedule' => array_map(static fn ($s) => [
+                'dow'   => (int) $s['dow_mask'],
+                'start' => $s['start_time'],
+                'end'   => $s['end_time'],
+            ], $takeoverSched->fetchAll()),
+        ],
     ];
     // Stable fingerprint so players (and ETags) can detect changes cheaply.
     $manifest['hash'] = substr(sha1(json_encode(
-        [$manifest['schedules'], $manifest['playlists'], $manifest['fallback_playlist']]
+        [$manifest['schedules'], $manifest['playlists'], $manifest['fallback_playlist'], $manifest['takeover']]
     )), 0, 16);
     return $manifest;
+}
+
+/** Whether a takeover page's rich-text body has any actual text once tags are stripped. */
+function takeover_content_empty(string $html): bool
+{
+    return trim(strip_tags($html)) === '';
+}
+
+/**
+ * Whether a screen's takeover page should be showing right now, per its manifest.
+ * Mirrored in JS as takeoverActive() in player.php — keep the two in sync. Same
+ * dow_mask/overnight-window semantics as power_should_be_on(); unlike power windows,
+ * an empty schedule list means "always on" (while enabled and non-empty) rather than
+ * "never managed" — the takeover only exists at all once an admin has enabled it.
+ */
+function takeover_active(array $manifest, ?int $ts = null): bool
+{
+    $t = $manifest['takeover'] ?? null;
+    if (!$t || !$t['enabled'] || takeover_content_empty($t['html'])) {
+        return false;
+    }
+    if (!$t['schedule']) {
+        return true;
+    }
+    $ts   = $ts ?? now();
+    $dow  = ((int) date('N', $ts)) - 1;              // 0 = Monday
+    $time = date('H:i', $ts);
+    $yDow = ($dow + 6) % 7;
+    foreach ($t['schedule'] as $s) {
+        $hit = $s['start'] <= $s['end']
+            ? (($s['dow'] >> $dow & 1) && $time >= $s['start'] && $time < $s['end'])
+            : ((($s['dow'] >> $dow & 1) && $time >= $s['start']) || (($s['dow'] >> $yDow & 1) && $time < $s['end']));
+        if ($hit) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Whitelists a small set of formatting tags for the takeover page's rich-text body
+ * and strips all attributes from what survives — the source is admin-authenticated
+ * but browser contenteditable/paste can inject style/on* attributes, and this HTML
+ * is rendered unescaped on the player, so treat it as untrusted input.
+ */
+function sanitize_takeover_html(string $html): string
+{
+    $allowed = strip_tags($html, '<b><strong><i><em><ul><ol><li><br><div><p>');
+    return preg_replace('/<(\/?[a-z0-9]+)[^>]*>/i', '<$1>', $allowed) ?? '';
 }
 
 /**

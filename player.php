@@ -47,6 +47,17 @@ $boot = [
   #status.visible { opacity:1; }
   #idle { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
           color:#333; font:16px monospace; }
+  .layer .takeover-page {
+    width:100%; height:100%; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:5vh; box-sizing:border-box; padding:6vh 8vw; text-align:center;
+    background:#000; color:#fff;
+    font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
+                 "Segoe UI Symbol", "Noto Color Emoji";
+    font-size: 3.5vw;
+  }
+  .layer .takeover-logo { width:33.333333%; height:auto; max-height:40vh; object-fit:contain; flex:0 0 auto; }
+  .layer .takeover-body { max-width:100%; }
+  .layer .takeover-body ul, .layer .takeover-body ol { display:inline-block; text-align:left; margin:0; }
 </style>
 </head>
 <body>
@@ -73,6 +84,8 @@ const state = {
   advanceTimer: null,
   watchdog: null,
   caching: false,
+  takeoverShown: false,    // true while the takeover page (not a scheduled item) is on screen
+  takeoverHtml: null,      // last-rendered takeover body, so live edits can be patched in place
 };
 
 /* ------------------------------------------------------------ manifest -- */
@@ -139,6 +152,34 @@ function activePlaylistId(m, d = new Date()) {
     if (cursor < acc) return tied[i].playlist;
   }
   return tied[tied.length - 1].playlist;
+}
+
+/** Strips tags to check for real text — mirrors PHP takeover_content_empty(). */
+function takeoverEmpty(html) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html || '';
+  return (tmp.textContent || '').trim() === '';
+}
+
+/**
+ * Whether the takeover page should be showing right now — mirrors PHP
+ * takeover_active(). An empty schedule list means "always on" (while enabled
+ * and non-empty), since the takeover only exists once an admin has enabled it.
+ */
+function takeoverActive(m, d = new Date()) {
+  const t = m.takeover;
+  if (!t || !t.enabled || takeoverEmpty(t.html)) return false;
+  if (!t.schedule || !t.schedule.length) return true;
+  const dow  = (d.getDay() + 6) % 7;
+  const yDow = (dow + 6) % 7;
+  const time = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  for (const s of t.schedule) {
+    const hit = s.start <= s.end
+      ? (s.dow >> dow & 1) && time >= s.start && time < s.end
+      : ((s.dow >> dow & 1) && time >= s.start) || ((s.dow >> yDow & 1) && time < s.end);
+    if (hit) return true;
+  }
+  return false;
 }
 
 /* ------------------------------------------------------- media caching -- */
@@ -215,6 +256,15 @@ async function advance() {
     state.index = -1;
   }
 
+  // Takeover pre-empts every schedule outright — checked before (and instead
+  // of) normal item resolution, same boundary-only cadence as manifest swaps.
+  if (state.manifest && takeoverActive(state.manifest)) {
+    showTakeover();
+    state.advanceTimer = setTimeout(advance, 5000);   // recheck until it lapses
+    return;
+  }
+  state.takeoverShown = false;
+
   let items = currentItems();
   document.getElementById('idle').style.display = items.length ? 'none' : 'flex';
   if (!items.length) { state.advanceTimer = setTimeout(advance, 5000); return; }
@@ -250,6 +300,53 @@ async function advance() {
   } catch (_) {
     state.advanceTimer = setTimeout(advance, 1000);   // broken item → skip on
   }
+  updateStatus();
+}
+
+/** Renders the takeover page into the hidden layer and cross-fades it in, same
+ *  as any other item — but idempotent, since advance() re-enters this every
+ *  5s for as long as takeover stays active. Already-shown calls just patch the
+ *  text in place (no re-fade) so an admin editing a live takeover sees it
+ *  update within one recheck cycle instead of only on the next activation. */
+function showTakeover() {
+  document.getElementById('idle').style.display = 'none';
+  const html = state.manifest.takeover.html;
+
+  if (state.takeoverShown) {
+    if (html !== state.takeoverHtml) {
+      state.takeoverHtml = html;
+      const body = state.layers[state.front].querySelector('.takeover-body');
+      if (body) body.innerHTML = html;
+    }
+    updateStatus();
+    return;
+  }
+  state.takeoverShown = true;
+  state.takeoverHtml = html;
+  state.playlistId = null;
+  state.index = -1;
+
+  const back = 1 - state.front;
+  const layer = state.layers[back];
+  if (state.blobUrl[back]) { URL.revokeObjectURL(state.blobUrl[back]); state.blobUrl[back] = null; }
+  layer.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'takeover-page';
+  const logo = document.createElement('img');
+  logo.className = 'takeover-logo';
+  logo.src = 'assets/logo_white.png';
+  logo.alt = '';
+  const body = document.createElement('div');
+  body.className = 'takeover-body';
+  body.innerHTML = html;
+  wrap.append(logo, body);
+  layer.appendChild(wrap);
+
+  state.layers[back].classList.add('active');
+  state.layers[state.front].classList.remove('active');
+  const old = state.layers[state.front];
+  setTimeout(() => { if (!old.classList.contains('active')) old.innerHTML = ''; }, 700);
+  state.front = back;
   updateStatus();
 }
 
@@ -330,14 +427,14 @@ function showUrl(item, layer, show) {
 /* ----------------------------------------------------------- liveness -- */
 
 function heartbeat() {
-  const items = state.manifest ? currentItems() : [];
+  const items = (state.manifest && !state.takeoverShown) ? currentItems() : [];
   const cur = state.index >= 0 && items[state.index] ? items[state.index] : null;
   const body = JSON.stringify({
     ua: navigator.userAgent,
     res: `${screen.width}x${screen.height}`,
-    playlist: state.playlistId,
-    item: cur ? cur.title : null,
-    type: cur ? cur.type : null,
+    playlist: state.takeoverShown ? null : state.playlistId,
+    item: state.takeoverShown ? 'Takeover page' : (cur ? cur.title : null),
+    type: state.takeoverShown ? 'takeover' : (cur ? cur.type : null),
   });
   fetch(`api.php?action=heartbeat&token=${BOOT.token}`, { method: 'POST', body })
     .then(() => { state.online = true; })
@@ -350,9 +447,12 @@ function heartbeat() {
  * Draws whatever's on the front layer to a small canvas and ships it to the
  * admin panel's thumbnail. Only video/img elements are same-origin (blob:
  * URLs or media.php) and thus readable by canvas; web-page (iframe) items
- * are silently skipped, leaving the last known screenshot in place.
+ * are silently skipped, leaving the last known screenshot in place. The
+ * takeover page is skipped too — it's synthetic HTML (its only <img> is the
+ * small logo), not a full-screen frame worth capturing.
  */
 function captureScreenshot() {
+  if (state.takeoverShown) return;
   const layer = state.layers[state.front];
   const el = layer && layer.querySelector('video, img');
   if (!el) return;

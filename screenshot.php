@@ -7,9 +7,11 @@
  * Canvas can't read cross-origin iframe pixels, so the player never captures
  * anything while a `url` playlist item is showing (see captureScreenshot() in
  * player.php) — any screenshot on disk in that case is just stale, from
- * whatever last played before it. Rather than show that misleading stale
- * image, this returns a small JSON marker instead when the *current* item
- * (per the last heartbeat's player_info) is type url, and the admin page
+ * whatever last played before it. Same story while the takeover page is
+ * active: it's synthetic HTML, not a video/img element, so there's nothing
+ * for canvas to draw. Rather than show that misleading stale image, this
+ * returns a small JSON marker instead when the *current* item (per the last
+ * heartbeat's player_info) is type url or takeover, and the admin page
  * renders a text fallback.
  */
 declare(strict_types=1);
@@ -33,10 +35,14 @@ if (!$screen) {
 $info = json_decode($screen['player_info'] ?? '', true);
 $itemType = is_array($info) ? ($info['type'] ?? null) : null;
 
-if ($itemType === 'url') {
+if ($itemType === 'url' || $itemType === 'takeover') {
     header('Content-Type: application/json');
     header('Cache-Control: no-store');
-    echo json_encode(['url_only' => true, 'title' => is_array($info) ? ($info['item'] ?? null) : null]);
+    echo json_encode([
+        'url_only'  => $itemType === 'url',
+        'takeover'  => $itemType === 'takeover',
+        'title'     => is_array($info) ? ($info['item'] ?? null) : null,
+    ]);
     exit;
 }
 

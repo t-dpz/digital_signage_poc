@@ -177,6 +177,28 @@ if ($action !== null) {
         flash('Power window removed.');
         redirect('index.php?page=screen&id=' . (int) $_POST['screen_id']);
 
+    case 'takeover_save':
+        $screenId = (int) $_POST['id'];
+        $html = sanitize_takeover_html((string) ($_POST['takeover_html'] ?? ''));
+        $pdo->prepare('UPDATE screens SET takeover_enabled=?, takeover_html=?, updated_at=? WHERE id=?')
+            ->execute([isset($_POST['takeover_enabled']) ? 1 : 0, $html, now(), $screenId]);
+
+        // Single-window model: "Always on" means no row at all (see takeover_active()'s
+        // empty-schedule-means-always-on rule); otherwise replace whatever's there with
+        // exactly the one dow/time window from the form.
+        $pdo->prepare('DELETE FROM takeover_schedules WHERE screen_id=?')->execute([$screenId]);
+        if (!isset($_POST['takeover_always_on'])) {
+            $mask = 0;
+            foreach ($_POST['dow'] ?? [] as $d) { $mask |= 1 << (int) $d; }
+            $st = preg_match('/^\d{2}:\d{2}$/', $_POST['start_time'] ?? '') ? $_POST['start_time'] : '08:00';
+            $en = preg_match('/^\d{2}:\d{2}$/', $_POST['end_time'] ?? '')   ? $_POST['end_time']   : '18:00';
+            $pdo->prepare('INSERT INTO takeover_schedules (screen_id, dow_mask, start_time, end_time, created_at)
+                           VALUES (?,?,?,?,?)')
+                ->execute([$screenId, $mask ?: 127, $st, $en, now()]);
+        }
+        flash('Takeover page saved.');
+        redirect('index.php?page=screen&id=' . $screenId);
+
     case 'content_upload':
         $ok = 0; $failed = [];
         $folderId = ($_POST['folder_id'] ?? '') !== '' ? (int) $_POST['folder_id'] : ensure_unsorted_folder($pdo);
@@ -506,7 +528,7 @@ function layout_top(string $title, bool $nav = true): void
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= e($title) ?> · Signage</title>
-<link rel="stylesheet" href="assets/admin.css">
+<link rel="stylesheet" href="assets/admin.css?v=<?= @filemtime(__DIR__ . '/assets/admin.css') ?: 0 ?>">
 </head>
 <body>
 <?php if ($nav): ?>
@@ -564,6 +586,7 @@ if ($page === 'screens') {
           $powerOn = power_should_be_on((int) $s['id']);
           $asleep = !$online && $powerOn === false;
           $m = build_manifest($s);
+          $takeover = takeover_active($m);
           $active = resolve_active_playlist($m);
           $activeName = null;
           foreach ($allPlaylists as $p) { if ((int) $p['id'] === $active) { $activeName = $p['name']; } }
@@ -572,7 +595,9 @@ if ($page === 'screens') {
         <td><span class="dot <?= $online ? 'ok' : ($asleep ? 'zzz' : '') ?>"></span><?=
               $online ? 'online' : ($asleep ? 'asleep (scheduled off)' : 'offline') ?></td>
         <td><a href="index.php?page=screen&id=<?= $s['id'] ?>"><?= e($s['name']) ?></a></td>
-        <td><?= $activeName ? e($activeName) : '<span class="muted">nothing scheduled</span>' ?></td>
+        <td><?php if ($takeover): ?><span class="tag warn">TAKEOVER</span>
+            <?php elseif ($activeName): ?><?= e($activeName) ?>
+            <?php else: ?><span class="muted">nothing scheduled</span><?php endif ?></td>
         <td class="muted"><?= $s['last_seen'] ? date('d M H:i', (int) $s['last_seen']) : 'never' ?></td>
         <td><code class="copy" data-copy="<?= e($url) ?>" title="Click to copy full URL"><?= e($url) ?></code></td>
       </tr>
@@ -615,9 +640,11 @@ if ($page === 'screen') {
             if (ctype.includes('application/json')) {
               const data = await res.json();
               img.style.display = 'none';
-              meta.textContent = data.title
-                ? `Currently showing "${data.title}" — embedded page, no thumbnail available`
-                : 'Embedded page — no thumbnail available';
+              meta.textContent = data.takeover
+                ? 'Takeover page is active — no thumbnail available'
+                : (data.title
+                    ? `Currently showing "${data.title}" — embedded page, no thumbnail available`
+                    : 'Embedded page — no thumbnail available');
               return;
             }
             if (!res.ok) { img.style.display = 'none'; meta.textContent = 'no screenshot yet'; return; }
@@ -816,6 +843,129 @@ if ($page === 'screen') {
           } catch (e) { /* leave last known statuses in place */ }
         }
         setInterval(refresh, 20000);
+      })();
+      </script>
+    </section>
+
+    <section class="card">
+      <?php
+      $takeoverManifest = build_manifest($s);
+      $takeoverIsActive = takeover_active($takeoverManifest);
+      $tkRow = $pdo->prepare('SELECT * FROM takeover_schedules WHERE screen_id=? ORDER BY start_time LIMIT 1');
+      $tkRow->execute([$s['id']]);
+      $tkRow = $tkRow->fetch() ?: null; ?>
+      <h2>Takeover page <?php if ($takeoverIsActive): ?><span class="tag warn">ACTIVE</span><?php endif ?></h2>
+      <p class="muted">While enabled and not empty, this full-screen page replaces everything scheduled below.</p>
+      <?php if ($tkRow): ?>
+      <p class="schedule-badge">Scheduled: <?= dow_label((int) $tkRow['dow_mask']) ?>,
+        <?= e($tkRow['start_time']) ?>–<?= e($tkRow['end_time']) ?><?= $tkRow['start_time'] > $tkRow['end_time'] ? ' (overnight)' : '' ?></p>
+      <?php endif ?>
+
+      <form method="post" id="takeover-form">
+        <input type="hidden" name="csrf" value="<?= $csrf ?>">
+        <input type="hidden" name="action" value="takeover_save">
+        <input type="hidden" name="id" value="<?= $s['id'] ?>">
+        <label class="inline"><input type="checkbox" name="takeover_enabled" <?= $s['takeover_enabled'] ? 'checked' : '' ?>> Enabled</label>
+
+        <div class="editor-toolbar">
+          <button type="button" data-wrap="b"><b>B</b></button>
+          <button type="button" data-wrap="i"><i>I</i></button>
+          <button type="button" data-list="1">List</button>
+          <button type="button" id="takeover-preview-toggle">Edit HTML</button>
+        </div>
+        <textarea name="takeover_html" id="takeover-editor" class="takeover-editor" rows="6" hidden><?= e($s['takeover_html'] ?: '') ?></textarea>
+        <div id="takeover-preview" class="takeover-editor" contenteditable="true"><?= $s['takeover_html'] ?: '' ?></div>
+
+        <details class="subfold">
+          <summary>Schedule this</summary>
+          <label class="inline"><input type="checkbox" id="takeover-always-on" name="takeover_always_on" <?= !$tkRow ? 'checked' : '' ?>> Always on
+            <span class="hint">Off to only take over during specific days/times.</span>
+          </label>
+          <div class="row" id="takeover-window-fields">
+            <label>From <input type="time" name="start_time" value="<?= e($tkRow['start_time'] ?? '08:00') ?>"></label>
+            <label>Until <span class="hint">earlier than "From" = overnight</span>
+              <input type="time" name="end_time" value="<?= e($tkRow['end_time'] ?? '18:00') ?>"></label>
+          </div>
+          <fieldset class="wide" id="takeover-window-days"><legend>Days</legend>
+            <?php foreach (['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as $i => $d): ?>
+              <label class="inline"><input type="checkbox" name="dow[]" value="<?= $i ?>"
+                <?= ($tkRow ? ((int) $tkRow['dow_mask'] >> $i & 1) : true) ? 'checked' : '' ?>> <?= $d ?></label>
+            <?php endforeach ?>
+          </fieldset>
+        </details>
+
+        <button>Save takeover page</button>
+      </form>
+      <script>
+      (function () {
+        const editor = document.getElementById('takeover-editor');
+        const preview = document.getElementById('takeover-preview');
+        const previewToggle = document.getElementById('takeover-preview-toggle');
+        const form = document.getElementById('takeover-form');
+        const alwaysOn = document.getElementById('takeover-always-on');
+        const windowFields = [document.getElementById('takeover-window-fields'), document.getElementById('takeover-window-days')];
+        let previewing = true;   // default view: rendered/centered, matching the real takeover page
+
+        // In HTML mode, formatting wraps the raw tag text around the textarea
+        // selection. In preview mode, the same buttons drive execCommand on the
+        // rendered contenteditable instead — same toolbar, both views always
+        // editable, just a different output (source text vs. rendered markup).
+        function wrapSelection(tag) {
+          if (previewing) {
+            preview.focus();
+            document.execCommand(tag === 'b' ? 'bold' : 'italic', false);
+            return;
+          }
+          const before = `<${tag}>`, after = `</${tag}>`;
+          const start = editor.selectionStart, end = editor.selectionEnd;
+          const val = editor.value;
+          const selected = val.slice(start, end);
+          editor.value = val.slice(0, start) + before + selected + after + val.slice(end);
+          editor.focus();
+          editor.selectionStart = start + before.length;
+          editor.selectionEnd = start + before.length + selected.length;
+        }
+
+        function insertList() {
+          if (previewing) {
+            preview.focus();
+            document.execCommand('insertUnorderedList', false);
+            return;
+          }
+          const start = editor.selectionStart, end = editor.selectionEnd;
+          const val = editor.value;
+          const selected = val.slice(start, end) || 'List item';
+          const items = selected.split('\n').filter((l) => l.trim() !== '').map((l) => `<li>${l}</li>`).join('');
+          const html = `<ul>${items}</ul>`;
+          editor.value = val.slice(0, start) + html + val.slice(end);
+          editor.focus();
+          editor.selectionStart = editor.selectionEnd = start + html.length;
+        }
+
+        document.querySelectorAll('.editor-toolbar button[data-wrap]').forEach((btn) => {
+          btn.addEventListener('click', () => wrapSelection(btn.dataset.wrap));
+        });
+        document.querySelector('.editor-toolbar button[data-list]').addEventListener('click', insertList);
+
+        previewToggle.addEventListener('click', () => {
+          previewing = !previewing;
+          if (previewing) { preview.innerHTML = editor.value; }  // raw -> rendered, still editable
+          else { editor.value = preview.innerHTML; }             // rendered -> raw, keeps edits made in preview
+          editor.hidden = previewing;
+          preview.hidden = !previewing;
+          previewToggle.textContent = previewing ? 'Edit HTML' : 'Preview';
+          (previewing ? preview : editor).focus();
+        });
+
+        // Preview is contenteditable, not the named form field — pull its current
+        // content back into the textarea before submit if that's the active view.
+        form.addEventListener('submit', () => { if (previewing) { editor.value = preview.innerHTML; } });
+
+        function syncAlwaysOn() {
+          windowFields.forEach((el) => el.querySelectorAll('input').forEach((i) => { i.disabled = alwaysOn.checked; }));
+        }
+        alwaysOn.addEventListener('change', syncAlwaysOn);
+        syncAlwaysOn();
       })();
       </script>
     </section>
