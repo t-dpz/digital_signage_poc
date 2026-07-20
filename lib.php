@@ -26,6 +26,12 @@ const POWER_DRIVERS = [
     'wol'  => 'Wake-on-LAN only',
 ];
 
+// Every screen starts with this ready-to-enable takeover message instead of a blank
+// editor — still needs takeover_enabled=1 to actually show, so it's a starting point,
+// not an opt-in surprise.
+const TAKEOVER_DEFAULT_HTML =
+    '<div><b>🔥 TAKEOVER PAGE 🔥</b></div><div><b><br></b></div><div>this is a takeover page</div>';
+
 $GLOBALS['cfg'] = require __DIR__ . '/config.php';
 
 function cfg(string $key): mixed

@@ -74,10 +74,10 @@ if ($action !== null) {
                            $powerDriver, $powerHost, $powerPort, $powerMac, now(), $id]);
         } else {
             $pdo->prepare('INSERT INTO screens (name, token, notes, fallback_playlist_id,
-                           power_driver, power_host, power_port, power_mac, updated_at, created_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?)')
+                           power_driver, power_host, power_port, power_mac, takeover_html, updated_at, created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)')
                 ->execute([$name, bin2hex(random_bytes(16)), trim($_POST['notes'] ?? ''), $fallback,
-                           $powerDriver, $powerHost, $powerPort, $powerMac, now(), now()]);
+                           $powerDriver, $powerHost, $powerPort, $powerMac, TAKEOVER_DEFAULT_HTML, now(), now()]);
             $id = (int) $pdo->lastInsertId();
         }
         flash('Screen saved.');
@@ -1007,20 +1007,21 @@ if ($page === 'screen') {
       </table>
       <?php endif ?>
 
+      <?php $pwrUnmanaged = $s['power_driver'] === ''; ?>
       <h3>Add power window</h3>
       <form method="post" class="grid">
         <input type="hidden" name="csrf" value="<?= $csrf ?>">
         <input type="hidden" name="action" value="power_schedule_add">
         <input type="hidden" name="screen_id" value="<?= $s['id'] ?>">
-        <label>On from <input type="time" name="start_time" value="08:00" required></label>
+        <label>On from <input type="time" name="start_time" id="power-window-start" value="08:00" <?= $pwrUnmanaged ? 'disabled' : '' ?> required></label>
         <label>Off at <span class="hint">earlier than "On from" = overnight</span>
-          <input type="time" name="end_time" value="18:00" required></label>
-        <fieldset class="wide"><legend>Days</legend>
+          <input type="time" name="end_time" id="power-window-end" value="18:00" <?= $pwrUnmanaged ? 'disabled' : '' ?> required></label>
+        <fieldset class="wide" id="power-window-days" <?= $pwrUnmanaged ? 'disabled' : '' ?>><legend>Days</legend>
           <?php foreach (['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as $i => $d): ?>
             <label class="inline"><input type="checkbox" name="dow[]" value="<?= $i ?>" checked> <?= $d ?></label>
           <?php endforeach ?>
         </fieldset>
-        <button>Add power window</button>
+        <button id="power-window-submit" <?= $pwrUnmanaged ? 'disabled' : '' ?>>Add power window</button>
       </form>
 
       <details class="subfold">
@@ -1033,7 +1034,7 @@ if ($page === 'screen') {
           <input type="hidden" name="fallback_playlist_id" value="<?= e((string) ($s['fallback_playlist_id'] ?? '')) ?>">
           <input type="hidden" name="notes" value="<?= e($s['notes'] ?? '') ?>">
           <label>Power control <span class="hint">LAN protocol used to switch the panel on/off</span>
-            <select name="power_driver">
+            <select name="power_driver" id="power-driver-select">
               <?php foreach (POWER_DRIVERS as $key => $label): ?>
                 <option value="<?= e($key) ?>" <?= ($s['power_driver'] ?? '') === $key ? 'selected' : '' ?>><?= e($label) ?></option>
               <?php endforeach ?>
@@ -1047,6 +1048,21 @@ if ($page === 'screen') {
           <button>Save power control</button>
         </form>
       </details>
+      <script>
+      (function () {
+        const driverSelect = document.getElementById('power-driver-select');
+        const fields = [
+          document.getElementById('power-window-start'),
+          document.getElementById('power-window-end'),
+          document.getElementById('power-window-days'),
+          document.getElementById('power-window-submit'),
+        ];
+        driverSelect.addEventListener('change', () => {
+          const unmanaged = driverSelect.value === '';
+          fields.forEach((el) => { el.disabled = unmanaged; });
+        });
+      })();
+      </script>
     </section>
 
     <section class="card">
@@ -1305,7 +1321,7 @@ if ($page === 'content') {
         <h2>Add a web page</h2>
         <form method="post" class="grid">
           <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="content_url">
-          <label>Title <input name="title" placeholder="Weather dashboard"></label>
+          <label>Title <input name="title" placeholder="Title"></label>
           <label class="wide">URL <input name="url" type="url" placeholder="https://…" required></label>
           <label>Folder
             <select name="folder_id">
@@ -1344,7 +1360,7 @@ if ($page === 'content') {
       <h3>New folder</h3>
       <form method="post" class="row">
         <input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="action" value="folder_create">
-        <input name="name" placeholder="e.g. Lobby loop" required>
+        <input name="name" placeholder="Folder name" required>
         <button>Create folder</button>
       </form>
     </section>

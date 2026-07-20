@@ -81,9 +81,12 @@ echo "==> server=$SIGNAGE_SERVER  token=$SIGNAGE_TOKEN  kiosk_user=$KIOSK_USER"
 
 # ------------------------------------------------------------- packages --
 
-echo "==> Installing packages (cage, curl, chromium)..."
+echo "==> Installing packages (cage, curl, chromium, emoji font)..."
 apt-get update -qq
-apt-get install -y --no-install-recommends cage curl >/dev/null
+# fonts-noto-color-emoji: Chromium never ships its own emoji glyphs, and a stock
+# Debian install has no color emoji font — without this, emoji in takeover-page
+# text (or any playlist content) render as blank/tofu boxes on the kiosk.
+apt-get install -y --no-install-recommends cage curl fonts-noto-color-emoji >/dev/null
 if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
     apt-get install -y --no-install-recommends chromium >/dev/null 2>&1 \
         || apt-get install -y --no-install-recommends chromium-browser >/dev/null
