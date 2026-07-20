@@ -84,6 +84,7 @@ tr:last-child td { border-bottom: 0; }
 .tag.video { color: #b48be6; border-color: #b48be644; }
 .tag.image { color: #e6c15a; border-color: #e6c15a44; }
 .tag.url   { color: var(--accent); border-color: #5aa9e644; }
+.tag.warn  { color: var(--warn); border-color: #e6675a44; }
 
 form.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; align-items: end; }
 form.grid .wide, fieldset.wide { grid-column: 1 / -1; }

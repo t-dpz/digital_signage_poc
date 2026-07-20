@@ -650,18 +650,10 @@ if ($page === 'screen') {
           </select>
         </label>
         <label class="wide">Notes <input name="notes" value="<?= e($s['notes'] ?? '') ?>" placeholder="location, switch port, …"></label>
-        <label>Power control <span class="hint">LAN protocol used to switch the panel on/off — see the Panel power card below</span>
-          <select name="power_driver">
-            <?php foreach (POWER_DRIVERS as $key => $label): ?>
-              <option value="<?= e($key) ?>" <?= ($s['power_driver'] ?? '') === $key ? 'selected' : '' ?>><?= e($label) ?></option>
-            <?php endforeach ?>
-          </select>
-        </label>
-        <label>Power IP/host <input name="power_host" value="<?= e($s['power_host'] ?? '') ?>" placeholder="192.168.1.50"></label>
-        <label>Power port <span class="hint">blank = driver default</span>
-          <input name="power_port" type="number" min="1" max="65535" value="<?= e((string) ($s['power_port'] ?? '')) ?>"></label>
-        <label>Power MAC <span class="hint">for Wake-on-LAN</span>
-          <input name="power_mac" value="<?= e($s['power_mac'] ?? '') ?>" placeholder="aa:bb:cc:dd:ee:ff"></label>
+        <input type="hidden" name="power_driver" value="<?= e($s['power_driver'] ?? '') ?>">
+        <input type="hidden" name="power_host" value="<?= e($s['power_host'] ?? '') ?>">
+        <input type="hidden" name="power_port" value="<?= e((string) ($s['power_port'] ?? '')) ?>">
+        <input type="hidden" name="power_mac" value="<?= e($s['power_mac'] ?? '') ?>">
         <button>Save screen</button>
       </form>
     </section>
@@ -829,7 +821,7 @@ if ($page === 'screen') {
     </section>
 
     <section class="card">
-      <h2>Panel power</h2>
+      <h2>Panel power <?php if ($s['power_driver'] === ''): ?><span class="tag warn">Not managed</span><?php endif ?></h2>
       <?php
       $pwrOn = power_should_be_on((int) $s['id']);
       $pwrSch = $pdo->prepare('SELECT * FROM power_schedules WHERE screen_id=? ORDER BY start_time');
@@ -842,7 +834,7 @@ if ($page === 'screen') {
           Should currently be <strong><?= $pwrOn ? 'ON' : 'OFF' ?></strong> per the windows below.
         <?php endif ?>
         <?php if ($s['power_driver'] === ''): ?>
-          <span class="hint">Power control is set to "Not managed" above — nothing will actually send on/off commands yet.</span>
+          <span class="hint">No power driver configured below — nothing will actually send on/off commands yet.</span>
         <?php endif ?>
       </p>
       <?php if ($pwrSch): ?>
@@ -880,6 +872,31 @@ if ($page === 'screen') {
         </fieldset>
         <button>Add power window</button>
       </form>
+
+      <details class="subfold">
+        <summary>Power control</summary>
+        <form method="post" class="grid">
+          <input type="hidden" name="csrf" value="<?= $csrf ?>">
+          <input type="hidden" name="action" value="screen_save">
+          <input type="hidden" name="id" value="<?= $s['id'] ?>">
+          <input type="hidden" name="name" value="<?= e($s['name'] ?? '') ?>">
+          <input type="hidden" name="fallback_playlist_id" value="<?= e((string) ($s['fallback_playlist_id'] ?? '')) ?>">
+          <input type="hidden" name="notes" value="<?= e($s['notes'] ?? '') ?>">
+          <label>Power control <span class="hint">LAN protocol used to switch the panel on/off</span>
+            <select name="power_driver">
+              <?php foreach (POWER_DRIVERS as $key => $label): ?>
+                <option value="<?= e($key) ?>" <?= ($s['power_driver'] ?? '') === $key ? 'selected' : '' ?>><?= e($label) ?></option>
+              <?php endforeach ?>
+            </select>
+          </label>
+          <label>Power IP/host <input name="power_host" value="<?= e($s['power_host'] ?? '') ?>" placeholder="192.168.1.50"></label>
+          <label>Power port <span class="hint">blank = driver default</span>
+            <input name="power_port" type="number" min="1" max="65535" value="<?= e((string) ($s['power_port'] ?? '')) ?>"></label>
+          <label>Power MAC <span class="hint">for Wake-on-LAN</span>
+            <input name="power_mac" value="<?= e($s['power_mac'] ?? '') ?>" placeholder="aa:bb:cc:dd:ee:ff"></label>
+          <button>Save power control</button>
+        </form>
+      </details>
     </section>
 
     <section class="card">
