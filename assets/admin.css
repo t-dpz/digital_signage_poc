@@ -1,13 +1,13 @@
 /* Signage admin — everything local, no webfonts (this box may never see the internet).
-   Palette: deep slate console + phosphor green for "alive" signals. */
+   Palette: deep slate console + HTB-style phosphor green for brand/section marks and "alive" signals. */
 :root {
   --bg: #14181d;
   --panel: #1c2229;
   --line: #2b333d;
   --ink: #d7dde4;
   --dim: #7c8894;
-  --live: #4cd97b;       /* heartbeat green */
-  --accent: #5aa9e6;     /* interactive blue */
+  --live: rgb(172, 237, 44); /* brand green — section titles, status/success signals */
+  --accent: #5aa9e6;         /* interactive blue */
   --warn: #e6675a;
   --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: system-ui, "Segoe UI", Roboto, sans-serif;
@@ -23,17 +23,18 @@ header {
   padding: 0 24px; height: 54px;
   background: var(--panel); border-bottom: 1px solid var(--line);
 }
-.brand { font: 700 15px var(--mono); letter-spacing: .18em; }
+.brand { font: 700 15px var(--mono); letter-spacing: .18em; color: var(--live); }
 .brand em { font-style: normal; color: var(--dim); letter-spacing: 0; font-weight: 400; }
 nav { display: flex; gap: 4px; flex: 1; }
 nav a { padding: 6px 14px; border-radius: 6px; color: var(--dim); }
-nav a.on, nav a:hover { color: var(--ink); background: var(--bg); text-decoration: none; }
+nav a:hover { color: var(--ink); background: var(--bg); text-decoration: none; }
+nav a.on { color: var(--live); background: var(--bg); text-decoration: none; }
 .logout { color: var(--dim); font-size: 13px; }
 
 main { max-width: 1080px; margin: 0 auto; padding: 28px 24px 80px; }
 .pagehead { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 h1 { font-size: 22px; margin: 8px 0 18px; }
-h2 { font-size: 15px; margin: 0 0 14px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); }
+h2 { font-size: 15px; margin: 0 0 14px; letter-spacing: .04em; text-transform: uppercase; color: var(--live); }
 h3 { font-size: 14px; margin: 22px 0 10px; color: var(--dim); }
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-bottom: 20px; }
@@ -101,14 +102,18 @@ fieldset { border: 1px solid var(--line); border-radius: 6px; display: flex; gap
 legend { font-size: 12px; color: var(--dim); padding: 0 6px; }
 
 button, .btn {
-  background: var(--accent); color: #0d1117; border: 0; border-radius: 6px;
-  padding: 8px 16px; font: 600 14px var(--sans); cursor: pointer; display: inline-block;
+  background: var(--live); color: #0d1117; border: 0; border-radius: 6px;
+  padding: 8px 16px; font: 700 13px var(--mono); letter-spacing: .04em; text-transform: uppercase;
+  cursor: pointer; display: inline-block; transition: filter .15s ease, box-shadow .15s ease;
 }
-button:hover, .btn:hover { filter: brightness(1.1); text-decoration: none; }
+button:hover, .btn:hover { filter: brightness(1.12); box-shadow: 0 0 14px rgba(172, 237, 44, .35); text-decoration: none; }
 button.ghost, .btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button.ghost:hover, .btn.ghost:hover { border-color: var(--live); color: var(--live); box-shadow: none; }
 button.danger, .btn.danger { background: transparent; color: var(--warn); border: 1px solid #e6675a55; }
-button.sm, .btn.sm { padding: 3px 9px; font-size: 12px; }
+button.danger:hover, .btn.danger:hover { border-color: var(--warn); box-shadow: none; }
+button.sm, .btn.sm { padding: 3px 9px; font-size: 11px; }
 button:disabled { opacity: .35; cursor: default; }
+button:disabled:hover { filter: none; box-shadow: none; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 .copy { cursor: copy; border-bottom: 1px dashed var(--dim); }
